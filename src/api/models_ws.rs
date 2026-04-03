@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::memory::MemoryContextPack;
 
 #[derive(Debug, Deserialize)]
 pub struct WsClientMessage {
@@ -7,6 +8,7 @@ pub struct WsClientMessage {
     pub stream: Option<bool>,
     pub search: Option<bool>,
     pub reason: Option<bool>,
+    pub workspace_context: Option<MemoryContextPack>,
 }
 
 #[derive(Debug, Serialize)]

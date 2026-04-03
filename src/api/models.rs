@@ -131,3 +131,63 @@ pub struct StepbitCoreStatusResponse {
     pub online: bool,
     pub message: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterWorkspaceRequest {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(alias = "root_path")]
+    pub root_path: String,
+    #[serde(alias = "vcs_branch")]
+    pub vcs_branch: Option<String>,
+    #[serde(alias = "created_at")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebindWorkspaceRequest {
+    #[serde(alias = "root_path")]
+    pub root_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceSymbolsQuery {
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceContextRequest {
+    #[serde(alias = "conversation_id", alias = "conversationId")]
+    pub conversation_id: Option<String>,
+    pub prompt: String,
+    #[serde(default)]
+    #[serde(alias = "recentTurns", alias = "recent_turns")]
+    pub recent_turns: Vec<WorkspaceConversationTurn>,
+    #[serde(default)]
+    #[serde(alias = "selectedPaths", alias = "selected_paths")]
+    pub selected_paths: Vec<String>,
+    #[serde(alias = "total_tokens", alias = "totalTokens")]
+    pub total_tokens: u32,
+    #[serde(alias = "reserved_for_output", alias = "reservedForOutput")]
+    pub reserved_for_output: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileWriteRequest {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceConversationTurn {
+    pub role: String,
+    pub text: String,
+    pub id: Option<String>,
+    #[serde(alias = "created_at", alias = "createdAt")]
+    pub created_at: Option<String>,
+}

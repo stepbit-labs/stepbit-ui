@@ -8,7 +8,7 @@ use tracing::{debug, error, info};
 use std::collections::HashMap;
 
 use crate::llm::{
-    models::{ChatOptions, ChatResponse, Message},
+    models::{ChatOptions, ChatResponse, Citation, Message, StructuredChatResponse},
     LlmError, LlmProvider,
 };
 
@@ -18,6 +18,52 @@ pub struct StepbitCoreProvider {
     default_model: String,
     api_key: Option<String>,
     rotating_token: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ResponseToolDefinition {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ResponseEnvelope {
+    model: String,
+    output: Vec<ResponseOutputItem>,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    policy_decisions: Vec<serde_json::Value>,
+    #[serde(default)]
+    audit_events: Vec<serde_json::Value>,
+    #[serde(default)]
+    turn_context: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ResponseOutputItem {
+    item_type: String,
+    role: String,
+    content: Vec<ResponseContentItem>,
+    status: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ResponseContentItem {
+    content_type: String,
+    text: String,
+    #[serde(default)]
+    citation: Option<ResponseCitation>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct ResponseCitation {
+    source_id: String,
+    title: String,
+    url: String,
+    #[serde(default)]
+    snippet: Option<String>,
 }
 
 impl StepbitCoreProvider {
@@ -101,6 +147,84 @@ impl StepbitCoreProvider {
                 *guard = Some(token_str.to_string());
                 debug!("Token rotated successfully");
             }
+        }
+    }
+
+    fn response_tools_from_options(options: &ChatOptions, search: bool) -> Vec<ResponseToolDefinition> {
+        if !search {
+            return Vec::new();
+        }
+
+        options
+            .tools
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|tool| {
+                matches!(
+                    tool.function.name.as_str(),
+                    "internet_search" | "read_url" | "read_full_content"
+                )
+            })
+            .map(|tool| ResponseToolDefinition {
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: tool.function.parameters,
+            })
+            .collect()
+    }
+
+    fn render_response_content(response: &ResponseEnvelope) -> StructuredChatResponse {
+        let mut assistant_segments = Vec::new();
+        let mut citations = Vec::new();
+
+        for item in &response.output {
+            if item.role != "assistant" && item.item_type != "citation" {
+                continue;
+            }
+
+            for content in &item.content {
+                if item.item_type == "message" && content.content_type == "output_text" {
+                    assistant_segments.push(content.text.clone());
+                }
+                if let Some(citation) = &content.citation {
+                    citations.push(Citation {
+                        source_id: citation.source_id.clone(),
+                        title: citation.title.clone(),
+                        url: citation.url.clone(),
+                        snippet: citation.snippet.clone(),
+                    });
+                }
+            }
+        }
+
+        citations.sort_by(|left, right| left.url.cmp(&right.url));
+        citations.dedup_by(|left, right| left.url == right.url);
+
+        let mut content = assistant_segments.join("\n\n").trim().to_string();
+        if !citations.is_empty() {
+            let sources = citations
+                .iter()
+                .map(|citation| format!("- [{}]({})", citation.title, citation.url))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !content.is_empty() {
+                content.push_str("\n\nSources\n");
+            }
+            content.push_str(&sources);
+        }
+
+        StructuredChatResponse {
+            content,
+            model: response.model.clone(),
+            citations,
+            metadata: json!({
+                "warnings": response.warnings,
+                "policy_decisions": response.policy_decisions,
+                "audit_events": response.audit_events,
+                "turn_context": response.turn_context,
+                "output": response.output,
+            }),
         }
     }
 }
@@ -308,6 +432,78 @@ impl LlmProvider for StepbitCoreProvider {
         Ok(None)
     }
 
+    async fn chat_structured(
+        &self,
+        messages: &[Message],
+        options: ChatOptions,
+        search: bool,
+        reason: bool,
+    ) -> Result<Option<StructuredChatResponse>, LlmError> {
+        let model = options.model.as_deref().unwrap_or(&self.default_model);
+
+        let mut final_messages: Vec<Message> = messages.to_vec();
+        if let Some(system) = &options.system_prompt {
+            final_messages.insert(
+                0,
+                Message {
+                    role: "system".to_string(),
+                    content: system.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            );
+        }
+
+        let response_tools = Self::response_tools_from_options(&options, search);
+        let approved_tools = if search {
+            vec![
+                "internet_search".to_string(),
+                "read_url".to_string(),
+                "read_full_content".to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        let mut body = json!({
+            "model": model,
+            "messages": final_messages,
+            "stream": false,
+            "search": search,
+            "reason": reason,
+            "max_output_tokens": options.max_tokens.unwrap_or(4096),
+            "temperature": options.temperature.unwrap_or(0.7),
+            "policy": {
+                "approved_tools": approved_tools
+            }
+        });
+
+        if !response_tools.is_empty() {
+            body["tools"] = json!(response_tools);
+            body["tool_choice"] = json!("required");
+        }
+
+        let response = self
+            .authenticated_request(reqwest::Method::POST, "/v1/responses", Some(body))
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError::Api(format!(
+                "stepbit-core structured response error {}: {}",
+                status, text
+            )));
+        }
+
+        let envelope: ResponseEnvelope = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Network(e.to_string()))?;
+
+        Ok(Some(Self::render_response_content(&envelope)))
+    }
+
     fn supported_models(&self) -> Vec<String> {
         vec![self.default_model.clone()]
     }
@@ -497,4 +693,3 @@ impl LlmProvider for StepbitCoreProvider {
         self
     }
 }
-

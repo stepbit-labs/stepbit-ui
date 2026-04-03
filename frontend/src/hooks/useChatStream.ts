@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { WsServerMessage, WsClientMessage, Message } from '../types';
+import type { WsServerMessage, WsClientMessage, Message, WorkspaceContextPack } from '../types';
 
 export const useChatStream = (sessionId: string | null) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -105,7 +105,7 @@ export const useChatStream = (sessionId: string | null) => {
     };
   }, [sessionId]);
 
-  const sendMessage = useCallback((content: string, search: boolean = false, reason: boolean = false) => {
+  const sendMessage = useCallback((content: string, search: boolean = false, reason: boolean = false, workspaceContext?: WorkspaceContextPack | null) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
       return;
@@ -119,7 +119,8 @@ export const useChatStream = (sessionId: string | null) => {
       content,
       stream: true,
       search,
-      reason
+      reason,
+      workspace_context: workspaceContext || undefined
     };
 
     // Optimistically add user message

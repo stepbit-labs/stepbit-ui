@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::AppConfig;
-use models::{ChatOptions, ChatResponse, Message};
+use models::{ChatOptions, ChatResponse, Message, StructuredChatResponse};
 
 #[derive(Debug, Error)]
 pub enum LlmError {
@@ -49,6 +49,16 @@ pub trait LlmProvider: Send + Sync {
         options: ChatOptions,
         tx: Sender<String>,
     ) -> Result<Option<Vec<models::ToolCall>>, LlmError>;
+
+    async fn chat_structured(
+        &self,
+        _messages: &[Message],
+        _options: ChatOptions,
+        _search: bool,
+        _reason: bool,
+    ) -> Result<Option<StructuredChatResponse>, LlmError> {
+        Ok(None)
+    }
 
     fn supported_models(&self) -> Vec<String>;
 
@@ -187,6 +197,21 @@ impl LlmProvider for ProviderManager {
         }
         self.get_active_provider()
             .chat_streaming(messages, options, tx)
+            .await
+    }
+
+    async fn chat_structured(
+        &self,
+        messages: &[Message],
+        mut options: ChatOptions,
+        search: bool,
+        reason: bool,
+    ) -> Result<Option<StructuredChatResponse>, LlmError> {
+        if let Some(model) = self.get_active_model_id() {
+            options.model = Some(model);
+        }
+        self.get_active_provider()
+            .chat_structured(messages, options, search, reason)
             .await
     }
 

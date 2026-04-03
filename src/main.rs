@@ -3,10 +3,13 @@ use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use actix_cors::Cors;
 use clap::Parser;
 use stepbit::config::AppConfig;
+use stepbit::memory::MemoryClient;
+use stepbit::terminal::TerminalManager;
 use stepbit::db;
 use stepbit::api::middleware::ApiKeyAuth;
 use stepbit::llm::ProviderFactory;
 use stepbit::cli::{commands::{Cli, Commands}, run_cli};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 async fn health(db: web::Data<stepbit::db::DbPool>) -> impl Responder {
@@ -72,8 +75,16 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    let memory_client = config.llm.stepbit_memory.as_ref().map(|memory| {
+        Arc::new(MemoryClient::new(
+            memory.base_url.clone(),
+            memory.api_key.clone(),
+        ))
+    });
     let host = config.server.host.clone();
     let port = config.server.port;
+    let terminal_api_base_url = format!("http://127.0.0.1:{port}");
+    let terminal_manager = Arc::new(TerminalManager::new(terminal_api_base_url));
 
     info!("Server listening on {}:{}", host, port);
 
@@ -88,6 +99,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(llm_provider.clone()))
+            .app_data(web::Data::new(memory_client.clone()))
+            .app_data(web::Data::new(terminal_manager.clone()))
             .wrap(cors)
             .wrap(ApiKeyAuth)
             .service(
@@ -97,6 +110,8 @@ async fn main() -> std::io::Result<()> {
                     .configure(stepbit::api::config_routes::configure)
                     .configure(stepbit::api::skills_routes::configure)
                     .configure(stepbit::api::pipeline_routes::configure)
+                    .configure(stepbit::api::workspace_routes::configure)
+                    .configure(stepbit::api::terminal_routes::configure)
                     .service(stepbit::api::routes_openai::openai_chat_completions)
             )
             .configure(stepbit::api::websocket::configure)

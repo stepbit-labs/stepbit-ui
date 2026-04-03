@@ -9,6 +9,27 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return undefined
+          }
+
+          if (id.includes('@codemirror') || id.includes('@uiw/react-codemirror')) {
+            return 'codemirror'
+          }
+
+          if (id.includes('xterm')) {
+            return 'xterm'
+          }
+          
+          return undefined
+        },
+      },
+    },
+  },
   test: {
     globals: true,
     environment: 'happy-dom',

@@ -38,6 +38,10 @@
 }
 
 @layer base {
+  :root {
+    --ui-radius-sm: 0.125rem;
+  }
+
   body {
     @apply bg-bg-primary text-text-primary font-sans antialiased;
   }
@@ -45,22 +49,30 @@
   code, pre {
     @apply font-mono;
   }
+
+  .rounded-2xl,
+  .rounded-xl,
+  .rounded-lg,
+  .rounded-md,
+  .rounded {
+    border-radius: var(--ui-radius-sm) !important;
+  }
 }
 
 /* Custom Utilities */
 @layer components {
   .glass {
-    @apply bg-gruv-dark-2/40 backdrop-blur-md border border-gruv-dark-4/50;
+    @apply bg-gruv-dark-2/30 backdrop-blur-sm border border-gruv-dark-4/40;
   }
   
   .btn-primary {
-    @apply bg-monokai-pink text-white px-6 py-2 rounded-lg font-semibold 
-           shadow-[0_0_15px_rgba(249,38,114,0.3)] hover:scale-105 
-           hover:shadow-[0_0_25px_rgba(249,38,114,0.5)] transition-all duration-300;
+    @apply bg-monokai-pink text-white px-4 py-1.5 rounded-sm font-semibold
+           shadow-[0_0_10px_rgba(249,38,114,0.18)] hover:brightness-110
+           transition-all duration-200;
   }
 
   .btn-secondary {
-    @apply bg-gruv-dark-3 text-gruv-light-1 px-6 py-2 rounded-lg font-semibold 
-           border border-gruv-dark-4 hover:bg-gruv-dark-4 transition-all duration-300;
+    @apply bg-gruv-dark-3 text-gruv-light-1 px-4 py-1.5 rounded-sm font-semibold
+           border border-gruv-dark-4 hover:bg-gruv-dark-4 transition-all duration-200;
   }
 }

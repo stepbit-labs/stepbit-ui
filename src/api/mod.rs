@@ -8,3 +8,5 @@ pub mod websocket;
 pub mod config_routes;
 pub mod skills_routes;
 pub mod pipeline_routes;
+pub mod workspace_routes;
+pub mod terminal_routes;

@@ -59,6 +59,22 @@ pub struct ChatResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Citation {
+    pub source_id: String,
+    pub title: String,
+    pub url: String,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredChatResponse {
+    pub content: String,
+    pub model: String,
+    pub citations: Vec<Citation>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,

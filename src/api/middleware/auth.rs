@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::{config::AppConfig, terminal::TerminalManager};
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, web,
@@ -7,6 +7,7 @@ use std::{
     future::{ready, Future, Ready},
     pin::Pin,
     rc::Rc,
+    sync::Arc,
 };
 use tracing::warn;
 
@@ -57,6 +58,7 @@ where
             || path == "/api/health"
             || path == "/"
             || path == "/playground"
+            || path.starts_with("/ws/terminal/")
             || (!path.starts_with("/api") && !path.starts_with("/ws") && !path.starts_with("/sessions"))
         {
             return Box::pin(async move { srv.call(req).await });
@@ -71,6 +73,10 @@ where
                 });
             }
         };
+
+        if is_terminal_session_authorized(&req) {
+            return Box::pin(async move { srv.call(req).await });
+        }
 
         let auth_header = req.headers().get("Authorization");
         let x_api_key = req.headers().get("X-API-Key");
@@ -112,4 +118,31 @@ where
             Ok(res)
         })
     }
+}
+
+fn is_terminal_session_authorized(req: &ServiceRequest) -> bool {
+    let path = req.path();
+    if !path.starts_with("/api/terminal/sessions/") || !path.ends_with("/workspace-load") {
+        return false;
+    }
+
+    let session_id = path
+        .trim_start_matches("/api/terminal/sessions/")
+        .trim_end_matches("/workspace-load")
+        .trim_end_matches('/');
+    if session_id.is_empty() {
+        return false;
+    }
+
+    let Some(token) = req
+        .headers()
+        .get("x-stepbit-terminal-token")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    req.app_data::<web::Data<Arc<TerminalManager>>>()
+        .map(|manager| manager.authorize_session_token(session_id, token))
+        .unwrap_or(false)
 }

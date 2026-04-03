@@ -10,9 +10,10 @@ auth:
     - "sk-dev-key-123"
   token_expiry_hours: 24
 
+
 llm:
-  provider: "stepbit-core"  # openai, anthropic, ollama, custom
-  model: "mistral-7b"
+  provider: "stepbit-core"
+  model: "mistral-7b.gguf"
   
   openai:
     api_base: "https://api.openai.com/v1"
@@ -35,8 +36,12 @@ llm:
 
   stepbit_core:
     base_url: "http://127.0.0.1:3000"
-    default_model: "mistral-7b"
+    default_model: "mistral-7b.gguf"
     api_key: "${STEPBIT_CORE_API_KEY}"
+
+  stepbit_memory:
+    base_url: "http://127.0.0.1:7077"
+    api_key: "${STEPBIT_MEMORY_API_KEY}"
 
 chat:
   max_history_messages: 50

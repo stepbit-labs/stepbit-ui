@@ -46,6 +46,42 @@ export interface WsClientMessage {
   stream?: boolean;
   search?: boolean;
   reason?: boolean;
+  workspace_context?: WorkspaceContextPack | null;
+}
+
+export interface WorkspaceContextPack {
+  version: 'v1';
+  workspaceId?: string | null;
+  conversationId?: string | null;
+  summary?: string | null;
+  sections: Array<{
+    id: string;
+    kind: string;
+    title?: string | null;
+    text: string;
+    priority: number;
+    token_estimate: number;
+    provenance: Array<{
+      source_kind: string;
+      source_id: string;
+      label?: string | null;
+      path?: string | null;
+      line_start?: number | null;
+      line_end?: number | null;
+      inclusion_reason: string;
+      score?: number | null;
+    }>;
+  }>;
+  tokenBudget: {
+    totalTokens: number;
+    reservedForOutput: number;
+    availableForContext: number;
+    usedForContext: number;
+  };
+  diagnostics: {
+    retrievalStrategy: string;
+    assemblyNotes: string[];
+  };
 }
 
 export interface PaginationQuery {
