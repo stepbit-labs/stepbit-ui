@@ -41,6 +41,7 @@ import {
   readWorkspaceSelectionSnapshotState,
   setSelectionSnapshotForWorkspace,
   writeWorkspaceSelectionSnapshotState,
+  WORKSPACE_EDITOR_SELECTION_EVENT,
   type WorkspaceEditorSelectionSnapshotState,
 } from '../lib/workspaceSelectionState';
 import { clsx } from 'clsx';
@@ -194,6 +195,25 @@ export function WorkspaceStudio({
   useEffect(() => {
     writeWorkspaceSelectionSnapshotState(localStorage, selectionSnapshotState);
   }, [selectionSnapshotState]);
+
+  useEffect(() => {
+    const syncSelectionState = () => {
+      setExpandedState(readWorkspaceTreeExpandedState(localStorage));
+      setSelectedFileByWorkspace(readWorkspaceEditorSelectionState(localStorage));
+      setSelectedSymbolState(readWorkspaceSymbolSelectionState(localStorage));
+      setSelectionSnapshotState(readWorkspaceSelectionSnapshotState(localStorage));
+    };
+
+    window.addEventListener('storage', syncSelectionState);
+    window.addEventListener(WORKSPACE_EDITOR_SELECTION_EVENT, syncSelectionState);
+    window.addEventListener('focus', syncSelectionState);
+
+    return () => {
+      window.removeEventListener('storage', syncSelectionState);
+      window.removeEventListener(WORKSPACE_EDITOR_SELECTION_EVENT, syncSelectionState);
+      window.removeEventListener('focus', syncSelectionState);
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(WORKSPACE_STUDIO_SIDEBAR_WIDTH_KEY, String(sidebarWidth));

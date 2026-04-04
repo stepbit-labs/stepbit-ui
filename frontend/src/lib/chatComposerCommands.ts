@@ -1,4 +1,4 @@
-export type ComposerCommandId = 'task' | 'workspace' | 'refs' | 'definition' | 'file';
+export type ComposerCommandId = 'task' | 'workspace' | 'refs' | 'definition' | 'file' | 'quantlabRun';
 
 export interface ComposerCommand {
   id: ComposerCommandId;
@@ -55,6 +55,13 @@ export const COMPOSER_COMMANDS: ComposerCommand[] = [
     title: 'Inspect file',
     description: 'Open and inspect the current file or a specific path from the workspace.',
     keywords: ['file', 'open', 'preview'],
+  },
+  {
+    id: 'quantlabRun',
+    trigger: '/quantlab-run',
+    title: 'Run QuantLab',
+    description: 'Execute quantlab_run directly and show structured results in the Results tab.',
+    keywords: ['quantlab', 'ql', 'run', 'backtest', 'finance', 'web3'],
   },
 ];
 
@@ -157,6 +164,8 @@ export function expandComposerCommand(
         `Inspect the file${topic ? ` ${topic}` : ` ${currentFilePath}`}.`,
         'Summarize its purpose, symbols, and any obvious follow-up work.',
       ].join('\n');
+    case 'quantlabRun':
+      return topic || '/quantlab-run strategy=rsi_ma_cross_v2 ticker=ETH-USD start=2023-01-01 end=2024-01-01 interval=1d rsi_buy_max=55 rsi_sell_min=80 cooldown_days=5';
     default:
       return topic || command.trigger;
   }

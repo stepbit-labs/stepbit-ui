@@ -1,6 +1,7 @@
 use actix_web::{get, web, Error, HttpRequest, HttpResponse};
 use actix_ws::Message;
 use futures_util::StreamExt as _;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{error, info};
@@ -9,7 +10,10 @@ use uuid::Uuid;
 use crate::api::models_ws::{WsClientMessage, WsServerMessage};
 use crate::db::{service::DbService, DbPool};
 use crate::llm::{
-    models::{ChatOptions, Message as LlmMessage, StructuredChatResponse},
+    models::{
+        ChatOptions, FunctionDefinition, McpToolDefinition, Message as LlmMessage,
+        StructuredChatResponse, ToolDefinition,
+    },
     LlmProvider, ProviderManager,
 };
 use crate::terminal::TerminalManager;
@@ -347,14 +351,25 @@ async fn handle_chat_message(
     }
 
     let mut tool_definitions = tools.get_definitions();
+    let mcp_tools = llm.get_mcp_tools().await.unwrap_or_default();
+    tool_definitions.extend(
+        mcp_tools
+            .into_iter()
+            .filter(|tool| is_supported_chat_mcp_tool(tool, search))
+            .map(mcp_tool_to_tool_definition),
+    );
+
     if !search {
-        // Filter out search tools if search is disabled
-        tool_definitions.retain(|t| {
-            t.function.name != "internet_search" 
-            && t.function.name != "read_full_content" 
-            && t.function.name != "read_url"
+        tool_definitions.retain(|tool| {
+            !matches!(
+                tool.function.name.as_str(),
+                "internet_search" | "read_full_content" | "read_url"
+            )
         });
     }
+
+    let mut seen_tools = HashSet::new();
+    tool_definitions.retain(|tool| seen_tools.insert(tool.function.name.clone()));
 
     let current_options = ChatOptions {
         system_prompt: Some(final_prompt),
@@ -635,6 +650,25 @@ fn uses_structured_stepbit_core(llm: &Arc<dyn LlmProvider>) -> bool {
     }
 
     llm.name() == "stepbit-core"
+}
+
+fn is_supported_chat_mcp_tool(tool: &McpToolDefinition, search: bool) -> bool {
+    match tool.name.as_str() {
+        "internet_search" | "read_url" | "read_full_content" => search,
+        "quantlab_run" | "quantlab_sweep" | "quantlab_forward" | "quantlab_portfolio" => true,
+        _ => false,
+    }
+}
+
+fn mcp_tool_to_tool_definition(tool: McpToolDefinition) -> ToolDefinition {
+    ToolDefinition {
+        r#type: "function".to_string(),
+        function: FunctionDefinition {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.input_schema,
+        },
+    }
 }
 
 fn format_workspace_context_pack(pack: &crate::memory::MemoryContextPack) -> String {

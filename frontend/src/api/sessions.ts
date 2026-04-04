@@ -1,5 +1,5 @@
 import api from './client';
-import type { Session, CreateSessionRequest, Message, CreateMessageRequest, PaginationQuery } from '../types';
+import type { Session, CreateSessionRequest, Message, CreateMessageRequest, PaginationQuery, QuantlabRunRequest } from '../types';
 
 export const sessionsApi = {
   list: (params?: PaginationQuery) => 
@@ -22,6 +22,9 @@ export const sessionsApi = {
     
   addMessage: (id: string, data: CreateMessageRequest) => 
     api.post<Message>(`sessions/${id}/messages`, data).then(res => res.data),
+
+  runQuantlab: (id: string, data: QuantlabRunRequest) =>
+    api.post(`sessions/${id}/quantlab/run`, data).then(res => res.data),
     
   export: (id: string) => 
     api.get(`sessions/${id}/export`, { responseType: 'blob' }).then(res => res.data),

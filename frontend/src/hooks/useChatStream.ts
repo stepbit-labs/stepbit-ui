@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { WsServerMessage, WsClientMessage, Message, WorkspaceContextPack } from '../types';
+import { sessionsApi } from '../api/sessions';
 
 export const useChatStream = (sessionId: string | null) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -80,6 +81,15 @@ export const useChatStream = (sessionId: string | null) => {
         setIsWaiting(false);
         setStatus(null);
         streamBufferRef.current = "";
+        if (sessionId) {
+          void sessionsApi.getMessages(sessionId)
+            .then((canonicalMessages) => {
+              setMessages(canonicalMessages);
+            })
+            .catch((refreshError) => {
+              console.error('Failed to refresh canonical messages', refreshError);
+            });
+        }
       } else if (data.type === 'error') {
         console.error('Stream error message received:', data.content);
         setError(data.content);

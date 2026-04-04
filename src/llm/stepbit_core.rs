@@ -151,20 +151,19 @@ impl StepbitCoreProvider {
     }
 
     fn response_tools_from_options(options: &ChatOptions, search: bool) -> Vec<ResponseToolDefinition> {
-        if !search {
-            return Vec::new();
-        }
-
         options
             .tools
             .clone()
             .unwrap_or_default()
             .into_iter()
             .filter(|tool| {
-                matches!(
-                    tool.function.name.as_str(),
-                    "internet_search" | "read_url" | "read_full_content"
-                )
+                let tool_name = tool.function.name.as_str();
+                matches!(tool_name, "quantlab_run" | "quantlab_sweep" | "quantlab_forward" | "quantlab_portfolio")
+                    || (search
+                        && matches!(
+                            tool_name,
+                            "internet_search" | "read_url" | "read_full_content"
+                        ))
             })
             .map(|tool| ResponseToolDefinition {
                 name: tool.function.name,
@@ -455,15 +454,10 @@ impl LlmProvider for StepbitCoreProvider {
         }
 
         let response_tools = Self::response_tools_from_options(&options, search);
-        let approved_tools = if search {
-            vec![
-                "internet_search".to_string(),
-                "read_url".to_string(),
-                "read_full_content".to_string(),
-            ]
-        } else {
-            Vec::new()
-        };
+        let approved_tools = response_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
 
         let mut body = json!({
             "model": model,
@@ -480,7 +474,7 @@ impl LlmProvider for StepbitCoreProvider {
 
         if !response_tools.is_empty() {
             body["tools"] = json!(response_tools);
-            body["tool_choice"] = json!("required");
+            body["tool_choice"] = json!("auto");
         }
 
         let response = self

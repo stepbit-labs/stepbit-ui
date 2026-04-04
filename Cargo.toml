@@ -35,6 +35,7 @@ urlencoding = "2.1.3"
 parking_lot = "0.12.5"
 portable-pty = "0.9"
 base64 = "0.22"
+pdf-extract = "0.7"
 
 [dev-dependencies]
 wiremock = "0.6"

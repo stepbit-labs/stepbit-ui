@@ -30,6 +30,7 @@ pub struct TerminalOutputQuery {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalWorkspaceLoadRequest {
     pub path: String,
+    pub index: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,20 +118,23 @@ pub async fn load_terminal_workspace(
         }
     };
 
-    let workspace_id = workspace.id.clone();
-    let manager_ref = manager.get_ref().clone();
-    let client_for_index = client.clone();
-    tokio::spawn(async move {
-        let _ = client_for_index.index_workspace(&workspace_id).await;
-    });
+    let should_index = payload.index.unwrap_or(false);
+    if should_index {
+        let workspace_id = workspace.id.clone();
+        let client_for_index = client.clone();
+        tokio::spawn(async move {
+            let _ = client_for_index.index_workspace(&workspace_id).await;
+        });
+    }
 
+    let manager_ref = manager.get_ref().clone();
     let _ = manager_ref.record_workspace_loaded(
         &session_id,
         TerminalWorkspaceEvent {
             workspace_id: workspace.id.clone(),
             workspace_name: workspace.name.clone(),
             root_path: workspace.root_path.clone(),
-            indexing_started: true,
+            indexing_started: should_index,
             already_registered,
         },
     );
@@ -138,10 +142,11 @@ pub async fn load_terminal_workspace(
     Ok(HttpResponse::Ok()
         .content_type("text/plain; charset=utf-8")
         .body(format!(
-            "WORKSPACE_ID={}\nWORKSPACE_NAME={}\nWORKSPACE_ROOT={}\nINDEXING_STARTED=1\nALREADY_REGISTERED={}\n",
+            "WORKSPACE_ID={}\nWORKSPACE_NAME={}\nWORKSPACE_ROOT={}\nINDEXING_STARTED={}\nALREADY_REGISTERED={}\n",
             workspace.id,
             workspace.name,
             workspace.root_path,
+            if should_index { 1 } else { 0 },
             if already_registered { 1 } else { 0 }
         )))
 }

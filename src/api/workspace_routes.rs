@@ -370,7 +370,7 @@ pub async fn workspace_file_content(
         Ok(path) => path,
         Err(response) => return Ok(response),
     };
-    let content = match fs::read_to_string(&resolved_path) {
+    let content = match read_workspace_file_content(&resolved_path, &relative_path) {
         Ok(content) => content,
         Err(error) => return Ok(bad_request(format!("failed to read workspace file: {error}"))),
     };
@@ -592,8 +592,36 @@ fn infer_language_from_path(path: &str) -> Option<String> {
             "md" => "markdown".to_string(),
             "json" => "json".to_string(),
             "toml" => "toml".to_string(),
+            "pdf" => "pdf".to_string(),
             _ => ext.to_string(),
         })
+}
+
+fn read_workspace_file_content(path: &Path, relative_path: &str) -> Result<String, String> {
+    if is_pdf_path(relative_path) {
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        return pdf_extract::extract_text_from_mem(&bytes)
+            .map(|text| normalize_extracted_text(&text))
+            .map_err(|error| error.to_string());
+    }
+
+    fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+fn normalize_extracted_text(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn is_pdf_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
 fn map_memory_error(error: MemoryError) -> HttpResponse {

@@ -17,6 +17,56 @@ export interface Message {
   metadata: Record<string, any>;
 }
 
+export interface StructuredResponseArtifact {
+  family: string;
+  title: string;
+  source_tool: string;
+  data: Record<string, any>;
+}
+
+export interface StructuredResponseCitation {
+  source_id: string;
+  title: string;
+  url: string;
+  snippet?: string | null;
+}
+
+export interface StructuredResponseContentItem {
+  content_type: string;
+  text: string;
+  citation?: StructuredResponseCitation | null;
+  artifact?: StructuredResponseArtifact | null;
+}
+
+export interface StructuredResponseOutputItem {
+  id?: string;
+  item_type: string;
+  role: string;
+  content: StructuredResponseContentItem[];
+  status: string;
+}
+
+export interface StructuredResponseEnvelope {
+  warnings?: string[];
+  policy_decisions?: any[];
+  audit_events?: any[];
+  turn_context?: Record<string, any>;
+  output?: StructuredResponseOutputItem[];
+}
+
+export interface QuantlabRunStatusMetadata {
+  command: 'quantlab_run';
+  status: 'running' | 'success' | 'error';
+  started_at: string;
+  finished_at?: string | null;
+  prompt?: string | null;
+  input?: Record<string, any> | null;
+  run_id?: string | null;
+  artifact_count?: number | null;
+  error_count?: number | null;
+  last_event?: string | null;
+}
+
 export interface CreateSessionRequest {
   name: string;
   metadata?: Record<string, any>;
@@ -131,4 +181,18 @@ export interface PipelineExecuteResult {
 export interface StepbitCoreStatus {
   online: boolean;
   message: string;
+}
+
+export interface QuantlabRunRequest {
+  prompt: string;
+  strategy: string;
+  ticker: string;
+  start: string;
+  end: string;
+  interval?: string | null;
+  rsi_buy_max?: number | null;
+  rsi_sell_min?: number | null;
+  cooldown_days?: number | null;
+  timeout_seconds?: number | null;
+  run_label?: string | null;
 }

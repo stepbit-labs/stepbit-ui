@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Send, Plus, Trash2, Bot, User, Loader2, Edit3, Settings, X, Check, Code, Eye, Globe, Brain, ChevronDown, BookOpen, Search } from 'lucide-react';
+import { Send, Plus, Trash2, Bot, User, Loader2, Edit3, Settings, X, Check, Code, Eye, Globe, Brain, ChevronDown, BookOpen, Search, BarChart3 } from 'lucide-react';
 import { sessionsApi } from '../api/sessions';
 import { configApi } from '../api/config';
 import { workspaceApi } from '../api/workspaces';
@@ -8,6 +8,7 @@ import { skillsApi, type Skill } from '../api/skills';
 import { useChatStream } from '../hooks/useChatStream';
 import { clsx } from 'clsx';
 import { MarkdownContent } from '../components/MarkdownContent';
+import { ResultsPanel } from '../components/ResultsPanel';
 import { ChatWorkspaceRail } from '../components/ChatWorkspaceRail';
 import {
     expandComposerCommand,
@@ -190,10 +191,11 @@ export const Chat = () => {
     const [searchEnabled, setSearchEnabled] = useState(false);
     const [reasoningEnabled, setReasoningEnabled] = useState(false);
     const [selectedSkills, setSelectedSkills] = useState<Skill[]>([]);
+    const [isQuantlabSubmitting, setIsQuantlabSubmitting] = useState(false);
     const [activeWorkspaceId, setActiveWorkspaceIdState] = useState<string | null>(() => localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY));
     const [workspaceSelectionTick, setWorkspaceSelectionTick] = useState(0);
     const [isWorkspaceDropdownOpen, setIsWorkspaceDropdownOpen] = useState(false);
-    const [activeSurfaceTab, setActiveSurfaceTab] = useState<'chat' | 'code' | 'terminal'>('chat');
+    const [activeSurfaceTab, setActiveSurfaceTab] = useState<'chat' | 'results' | 'code' | 'terminal'>('chat');
     const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
         const stored = Number(localStorage.getItem(CHAT_SIDEBAR_WIDTH_STORAGE_KEY) || 224);
         return Number.isFinite(stored)
@@ -372,6 +374,26 @@ export const Chat = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, isWaiting]);
 
+    const latestStructuredResultMessage = useMemo(() => {
+        return [...messages]
+            .reverse()
+            .find((message) =>
+                Array.isArray(message.metadata?.structured_response?.output) ||
+                message.metadata?.quantlab_run_status?.command === 'quantlab_run',
+            ) || null;
+    }, [messages]);
+
+    useEffect(() => {
+        const usedTools = latestStructuredResultMessage?.metadata?.structured_response?.turn_context?.used_tools;
+        if (!Array.isArray(usedTools)) {
+            return;
+        }
+
+        if (usedTools.some((tool: unknown) => typeof tool === 'string' && tool.startsWith('quantlab_'))) {
+            setActiveSurfaceTab('results');
+        }
+    }, [latestStructuredResultMessage]);
+
     // Mutations
     const updateSession = useMutation({
         mutationFn: ({ id, name, metadata }: { id: string, name?: string, metadata?: any }) =>
@@ -400,7 +422,7 @@ export const Chat = () => {
     });
 
     const handleSend = () => {
-        if (!input.trim() || (activeSurfaceTab === 'chat' && isStreaming)) return;
+        if (!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isQuantlabSubmitting) return;
         void handleSendAsync();
     };
 
@@ -421,6 +443,148 @@ export const Chat = () => {
         requestAnimationFrame(() => inputRef.current?.focus());
     };
 
+    const handleQuantlabSlashCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parseQuantlabRunArgs(remainder);
+        if (!parsed.ok) {
+            setMessages(prev => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: parsed.error,
+                    model: 'quantlab_run',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {}
+                }
+            ]);
+            setActiveSurfaceTab('chat');
+            return;
+        }
+
+        const startedAt = new Date().toISOString();
+        const optimisticUserId = Date.now();
+        const optimisticAssistantId = optimisticUserId + 1;
+
+        setIsQuantlabSubmitting(true);
+        setMessages(prev => [
+            ...prev,
+            {
+                id: optimisticUserId,
+                session_id: activeSessionId,
+                role: 'user',
+                content: rawPrompt,
+                model: null,
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    source: 'quantlab-slash-command',
+                    pending: true,
+                }
+            },
+            {
+                id: optimisticAssistantId,
+                session_id: activeSessionId,
+                role: 'assistant',
+                content: 'QuantLab launched. Waiting for report, artifacts, and AI analysis...',
+                model: 'quantlab_run',
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    pending: true,
+                    quantlab_run_status: {
+                        command: 'quantlab_run',
+                        status: 'running',
+                        started_at: startedAt,
+                        prompt: rawPrompt,
+                        input: {
+                            strategy: parsed.payload.strategy,
+                            ticker: parsed.payload.ticker,
+                            start: parsed.payload.start,
+                            end: parsed.payload.end,
+                            interval: parsed.payload.interval,
+                            rsi_buy_max: parsed.payload.rsi_buy_max,
+                            rsi_sell_min: parsed.payload.rsi_sell_min,
+                            cooldown_days: parsed.payload.cooldown_days,
+                        },
+                        artifact_count: 0,
+                        error_count: 0,
+                        last_event: 'SESSION_STARTED',
+                    }
+                }
+            }
+        ]);
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'quantlab-slash-command'
+                }
+            });
+            await sessionsApi.runQuantlab(activeSessionId, {
+                prompt: rawPrompt,
+                strategy: parsed.payload.strategy,
+                ticker: parsed.payload.ticker,
+                start: parsed.payload.start,
+                end: parsed.payload.end,
+                interval: parsed.payload.interval,
+                rsi_buy_max: parsed.payload.rsi_buy_max,
+                rsi_sell_min: parsed.payload.rsi_sell_min,
+                cooldown_days: parsed.payload.cooldown_days,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            setIsQuantlabSubmitting(false);
+        } catch (error: any) {
+            setMessages(prev => [
+                ...prev.filter((message) => message.id !== optimisticAssistantId && message.id !== optimisticUserId),
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: error?.response?.data || error?.message || 'QuantLab execution failed.',
+                    model: 'quantlab_run',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {
+                        quantlab_run_status: {
+                            command: 'quantlab_run',
+                            status: 'error',
+                            started_at: new Date().toISOString(),
+                            finished_at: new Date().toISOString(),
+                            prompt: rawPrompt,
+                            input: {
+                                strategy: parsed.payload.strategy,
+                                ticker: parsed.payload.ticker,
+                                start: parsed.payload.start,
+                                end: parsed.payload.end,
+                                interval: parsed.payload.interval,
+                                rsi_buy_max: parsed.payload.rsi_buy_max,
+                                rsi_sell_min: parsed.payload.rsi_sell_min,
+                                cooldown_days: parsed.payload.cooldown_days,
+                            },
+                            artifact_count: 0,
+                            error_count: 1,
+                            last_event: 'SESSION_FAILED',
+                        }
+                    }
+                }
+            ]);
+            setActiveSurfaceTab('chat');
+            setIsQuantlabSubmitting(false);
+        }
+    };
+
     const handleSendAsync = async () => {
         if (activeSurfaceTab === 'terminal') {
             return;
@@ -428,6 +592,10 @@ export const Chat = () => {
 
         let finalMessage = input.trim();
         const parsedCommand = parseComposerCommand(finalMessage);
+        if (parsedCommand?.id === 'quantlabRun') {
+            await handleQuantlabSlashCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
         const workspaceId = activeWorkspaceId || localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
         const selectedPaths = resolveWorkspaceContextPaths({
             currentFilePath: activeWorkspaceSelection,
@@ -701,7 +869,7 @@ export const Chat = () => {
                             </div>
                             <div className="flex items-center gap-2">
                                 <div className="inline-flex rounded-sm border border-gruv-dark-4/30 bg-gruv-dark-3/30 p-0.5">
-                                    {(['chat', 'code', 'terminal'] as const).map((tab) => (
+                                    {(['chat', 'results', 'code', 'terminal'] as const).map((tab) => (
                                         <button
                                             key={tab}
                                             type="button"
@@ -832,6 +1000,84 @@ export const Chat = () => {
                                                     <pre className="whitespace-pre-wrap font-mono text-[12px] leading-5 text-gruv-light-3">
                                                         {m.content}
                                                     </pre>
+                                                ) : m.role === 'assistant' && m.metadata?.quantlab_run_status?.status === 'running' ? (
+                                                    <div className="min-w-[22rem] space-y-4">
+                                                        <div className="overflow-hidden rounded-sm border border-monokai-aqua/20 bg-[radial-gradient(circle_at_top,_rgba(102,217,239,0.18),_transparent_45%),linear-gradient(180deg,rgba(40,40,40,0.9),rgba(29,32,33,0.95))] p-4">
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <div>
+                                                                    <div className="text-[12px] font-mono uppercase tracking-[0.22em] text-monokai-aqua">
+                                                                        QuantLab Running
+                                                                    </div>
+                                                                    <div className="mt-1 text-[12px] text-gruv-light-3">
+                                                                        Lanzado, ejecutando backtest y esperando artifacts.
+                                                                    </div>
+                                                                </div>
+                                                                <div className="relative flex h-16 w-16 items-center justify-center">
+                                                                    <div className="absolute inset-0 rounded-full border border-monokai-aqua/20 animate-ping" />
+                                                                    <div className="absolute inset-[7px] rounded-full border border-monokai-green/20 animate-pulse" />
+                                                                    <div className="absolute inset-0 animate-spin [animation-duration:5s]">
+                                                                        <div className="absolute -top-1 left-1/2 -translate-x-1/2 rounded-full border border-monokai-aqua/30 bg-gruv-dark-2 p-1">
+                                                                            <BarChart3 className="h-3.5 w-3.5 text-monokai-aqua" />
+                                                                        </div>
+                                                                        <div className="absolute right-0 top-1/2 -translate-y-1/2 rounded-full border border-monokai-green/30 bg-gruv-dark-2 p-1">
+                                                                            <Brain className="h-3.5 w-3.5 text-monokai-green" />
+                                                                        </div>
+                                                                        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 rounded-full border border-monokai-orange/30 bg-gruv-dark-2 p-1">
+                                                                            <Globe className="h-3.5 w-3.5 text-monokai-orange" />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex h-10 w-10 items-center justify-center rounded-full border border-monokai-pink/30 bg-monokai-pink/10 shadow-[0_0_20px_rgba(249,38,114,0.15)]">
+                                                                        <Loader2 className="h-4.5 w-4.5 animate-spin text-monokai-pink" />
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <div className="mt-4 space-y-2">
+                                                                <div className="h-1.5 overflow-hidden rounded-full bg-gruv-dark-4/40">
+                                                                    <div className="h-full w-1/3 animate-[pulse_1.8s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-monokai-aqua via-monokai-green to-monokai-orange" />
+                                                                </div>
+                                                                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.16em] text-gruv-light-4">
+                                                                    <span className="inline-flex items-center gap-1">
+                                                                        <BarChart3 className="h-3 w-3 text-monokai-aqua" />
+                                                                        Backtest
+                                                                    </span>
+                                                                    <span className="inline-flex items-center gap-1">
+                                                                        <Brain className="h-3 w-3 text-monokai-green" />
+                                                                        Summary
+                                                                    </span>
+                                                                    <span className="inline-flex items-center gap-1">
+                                                                        <Globe className="h-3 w-3 text-monokai-orange" />
+                                                                        Results
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid gap-2 text-[11px] text-gruv-light-3 md:grid-cols-2">
+                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
+                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Strategy</div>
+                                                                <div className="mt-1 text-gruv-light-1">{m.metadata?.quantlab_run_status?.input?.strategy || 'n/a'}</div>
+                                                            </div>
+                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
+                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Ticker</div>
+                                                                <div className="mt-1 text-gruv-light-1">{m.metadata?.quantlab_run_status?.input?.ticker || 'n/a'}</div>
+                                                            </div>
+                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
+                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Range</div>
+                                                                <div className="mt-1 text-gruv-light-1">
+                                                                    {m.metadata?.quantlab_run_status?.input?.start || 'n/a'} to {m.metadata?.quantlab_run_status?.input?.end || 'n/a'}
+                                                                </div>
+                                                            </div>
+                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
+                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Params</div>
+                                                                <div className="mt-1 text-gruv-light-1">
+                                                                    RSI buy {m.metadata?.quantlab_run_status?.input?.rsi_buy_max ?? 'default'}
+                                                                    {' / '}
+                                                                    RSI sell {m.metadata?.quantlab_run_status?.input?.rsi_sell_min ?? 'default'}
+                                                                    {' / '}
+                                                                    cooldown {m.metadata?.quantlab_run_status?.input?.cooldown_days ?? 'default'}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
                                                 ) : (
                                                     <MarkdownContent content={m.content} />
                                                 )}
@@ -859,6 +1105,10 @@ export const Chat = () => {
                                         </div>
                                     )}
                                     <div ref={messagesEndRef} />
+                                </div>
+                            ) : activeSurfaceTab === 'results' ? (
+                                <div className="min-h-0 flex-1 overflow-hidden">
+                                    <ResultsPanel message={latestStructuredResultMessage} />
                                 </div>
                             ) : activeSurfaceTab === 'code' ? (
                                 <div className="min-h-0 flex-1 overflow-hidden">
@@ -923,6 +1173,14 @@ export const Chat = () => {
                             )}
 
                             <div className="mb-2 flex items-center gap-2 overflow-x-auto">
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveSurfaceTab('results')}
+                                    className="inline-flex items-center gap-1.5 rounded-sm border border-gruv-dark-4/40 bg-gruv-dark-3/30 px-2 py-1 text-[10px] text-gruv-light-3 hover:text-gruv-light-1"
+                                >
+                                    <BarChart3 className="w-3 h-3" />
+                                    Results
+                                </button>
                                 <button
                                     type="button"
                                     onClick={() => setActiveSurfaceTab('code')}
@@ -1011,10 +1269,10 @@ export const Chat = () => {
                                     />
                                     <button
                                         onClick={handleSend}
-                                        disabled={!input.trim() || (activeSurfaceTab === 'chat' && isStreaming)}
+                                        disabled={!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isQuantlabSubmitting}
                                         className="absolute right-2 bottom-2 p-1.5 bg-monokai-pink text-white rounded-sm disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition-all shadow-sm"
                                     >
-                                        <Send className="w-4 h-4" />
+                                        {isQuantlabSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                                     </button>
                                     {activeSurfaceTab === 'chat' && (isWaiting || isStreaming) && (
                                         <button
@@ -1183,3 +1441,90 @@ export const Chat = () => {
         </div>
     );
 };
+
+function parseQuantlabRunArgs(input: string): {
+    ok: true;
+    payload: {
+        strategy: string;
+        ticker: string;
+        start: string;
+        end: string;
+        interval: string;
+        rsi_buy_max?: number;
+        rsi_sell_min?: number;
+        cooldown_days?: number;
+    };
+} | {
+    ok: false;
+    error: string;
+} {
+    const tokens = input
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+
+    const pairs = new Map<string, string>();
+    for (const token of tokens) {
+        const [key, ...rest] = token.split('=');
+        if (!key || rest.length === 0) {
+            continue;
+        }
+        pairs.set(key.toLowerCase(), rest.join('=').trim());
+    }
+
+    const strategy = pairs.get('strategy');
+    const ticker = pairs.get('ticker');
+    const start = pairs.get('start');
+    const end = pairs.get('end');
+    const interval = pairs.get('interval') || '1d';
+    const rsiBuyMax = pairs.get('rsi_buy_max');
+    const rsiSellMin = pairs.get('rsi_sell_min');
+    const cooldownDays = pairs.get('cooldown_days');
+
+    if (!strategy || !ticker || !start || !end) {
+        return {
+            ok: false,
+            error: 'Uso esperado: `/quantlab-run strategy=rsi_ma_cross_v2 ticker=ETH-USD start=2023-01-01 end=2024-01-01 interval=1d rsi_buy_max=55 rsi_sell_min=80 cooldown_days=5`',
+        };
+    }
+
+    const parseOptionalNumber = (value: string | undefined, field: string) => {
+        if (value == null || value === '') {
+            return { ok: true as const, value: undefined };
+        }
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+            return { ok: false as const, error: `\`${field}\` debe ser numerico.` };
+        }
+        return { ok: true as const, value: parsed };
+    };
+
+    const parsedRsiBuyMax = parseOptionalNumber(rsiBuyMax, 'rsi_buy_max');
+    if (!parsedRsiBuyMax.ok) {
+        return { ok: false, error: parsedRsiBuyMax.error };
+    }
+
+    const parsedRsiSellMin = parseOptionalNumber(rsiSellMin, 'rsi_sell_min');
+    if (!parsedRsiSellMin.ok) {
+        return { ok: false, error: parsedRsiSellMin.error };
+    }
+
+    const parsedCooldownDays = parseOptionalNumber(cooldownDays, 'cooldown_days');
+    if (!parsedCooldownDays.ok) {
+        return { ok: false, error: parsedCooldownDays.error };
+    }
+
+    return {
+        ok: true,
+        payload: {
+            strategy,
+            ticker,
+            start,
+            end,
+            interval,
+            rsi_buy_max: parsedRsiBuyMax.value,
+            rsi_sell_min: parsedRsiSellMin.value,
+            cooldown_days: parsedCooldownDays.value != null ? Math.trunc(parsedCooldownDays.value) : undefined,
+        }
+    };
+}
