@@ -133,6 +133,74 @@ pub struct StepbitCoreStatusResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SessionGoalRunRequest {
+    pub prompt: String,
+    pub goal: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionReasoningRunRequest {
+    pub prompt: String,
+    pub question: String,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionPipelineRunRequest {
+    pub prompt: String,
+    pub pipeline_id: Option<i64>,
+    pub pipeline_name: Option<String>,
+    pub question: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionExecutionCommandResponse {
+    pub message_id: i64,
+    pub run_id: String,
+    pub summary: String,
+    pub structured_response: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionCronCreateRequest {
+    pub prompt: String,
+    pub job_id: String,
+    pub schedule: String,
+    pub execution_type: String,
+    pub enabled: Option<bool>,
+    pub goal: Option<String>,
+    pub reasoning_prompt: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub pipeline_id: Option<i64>,
+    pub pipeline_name: Option<String>,
+    pub input_json: Option<serde_json::Value>,
+    pub retry_policy: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionTriggerCreateRequest {
+    pub prompt: String,
+    pub trigger_id: String,
+    pub event_type: String,
+    pub action_kind: String,
+    pub goal: Option<String>,
+    pub reasoning_prompt: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub pipeline_id: Option<i64>,
+    pub pipeline_name: Option<String>,
+    pub condition: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionAutomationCommandResponse {
+    pub message_id: i64,
+    pub automation_id: String,
+    pub automation_kind: String,
+    pub summary: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterWorkspaceRequest {
     pub id: Option<String>,

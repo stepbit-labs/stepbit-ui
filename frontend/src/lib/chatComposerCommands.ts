@@ -1,4 +1,15 @@
-export type ComposerCommandId = 'task' | 'workspace' | 'refs' | 'definition' | 'file' | 'quantlabRun';
+export type ComposerCommandId =
+  | 'task'
+  | 'workspace'
+  | 'refs'
+  | 'definition'
+  | 'file'
+  | 'quantlabRun'
+  | 'goalRun'
+  | 'reasoningRun'
+  | 'pipelineRun'
+  | 'cronCreate'
+  | 'triggerCreate';
 
 export interface ComposerCommand {
   id: ComposerCommandId;
@@ -62,6 +73,41 @@ export const COMPOSER_COMMANDS: ComposerCommand[] = [
     title: 'Run QuantLab',
     description: 'Execute quantlab_run directly and show structured results in the Results tab.',
     keywords: ['quantlab', 'ql', 'run', 'backtest', 'finance', 'web3'],
+  },
+  {
+    id: 'goalRun',
+    trigger: '/goal-run',
+    title: 'Execute goal',
+    description: 'Run a goal directly in stepbit-core and persist the execution in Runs.',
+    keywords: ['goal', 'agent', 'automation', 'execute'],
+  },
+  {
+    id: 'reasoningRun',
+    trigger: '/reasoning-run',
+    title: 'Execute reasoning',
+    description: 'Run a reasoning graph derived from a prompt and inspect its steps in Runs.',
+    keywords: ['reasoning', 'analyze', 'graph', 'inspect'],
+  },
+  {
+    id: 'pipelineRun',
+    trigger: '/pipeline-run',
+    title: 'Execute pipeline',
+    description: 'Run a saved pipeline by id or name and persist its execution and artifacts.',
+    keywords: ['pipeline', 'workflow', 'run', 'execute'],
+  },
+  {
+    id: 'cronCreate',
+    trigger: '/cron-create',
+    title: 'Create cron job',
+    description: 'Create a scheduled goal, reasoning graph, or pipeline job and inspect it in Automations.',
+    keywords: ['cron', 'schedule', 'job', 'automation'],
+  },
+  {
+    id: 'triggerCreate',
+    trigger: '/trigger-create',
+    title: 'Create trigger',
+    description: 'Create an event-driven automation that dispatches a goal, reasoning graph, or pipeline.',
+    keywords: ['trigger', 'event', 'automation', 'workflow'],
   },
 ];
 
@@ -166,6 +212,16 @@ export function expandComposerCommand(
       ].join('\n');
     case 'quantlabRun':
       return topic || '/quantlab-run strategy=rsi_ma_cross_v2 ticker=ETH-USD start=2023-01-01 end=2024-01-01 interval=1d rsi_buy_max=55 rsi_sell_min=80 cooldown_days=5';
+    case 'goalRun':
+      return topic || '/goal-run audit the active workspace and list the main architectural risks';
+    case 'reasoningRun':
+      return topic || '/reasoning-run prompt="Analyze the active workspace architecture and explain the main tradeoffs" max_tokens=384';
+    case 'pipelineRun':
+      return topic || '/pipeline-run id=1 question="Run the pipeline against the active workspace and summarize the result"';
+    case 'cronCreate':
+      return topic || '/cron-create id=daily_quant schedule="0 9 * * *" type=goal goal="Review the active workspace and summarize the important changes"';
+    case 'triggerCreate':
+      return topic || '/trigger-create id=quantlab_alert event=quantlab.completed action=goal goal="Summarize the completed run and flag anomalies"';
     default:
       return topic || command.trigger;
   }

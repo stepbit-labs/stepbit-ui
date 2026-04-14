@@ -618,6 +618,19 @@ impl DbService {
         }
     }
 
+    pub fn get_pipeline_by_name(conn: &Connection, name: &str) -> DbResult<Option<Pipeline>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR)
+             FROM pipelines WHERE lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1"
+        )?;
+        let mut rows = stmt.query_map(params![name], Self::row_to_pipeline)?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn list_pipelines(conn: &Connection, limit: usize, offset: usize) -> DbResult<Vec<Pipeline>> {
         let mut stmt = conn.prepare(
             "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) 

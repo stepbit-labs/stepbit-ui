@@ -1,21 +1,33 @@
-import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useMemo, useRef, type ReactElement } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Send, Plus, Trash2, Bot, User, Loader2, Edit3, Settings, X, Check, Code, Eye, Globe, Brain, ChevronDown, BookOpen, Search, BarChart3 } from 'lucide-react';
+import { Send, Plus, Trash2, Bot, User, Loader2, Edit3, Settings, X, Check, Code, Eye, Globe, Brain, ChevronDown, BookOpen, Search, BarChart3, Workflow } from 'lucide-react';
 import { sessionsApi } from '../api/sessions';
 import { configApi } from '../api/config';
 import { workspaceApi } from '../api/workspaces';
 import { skillsApi, type Skill } from '../api/skills';
+import { executionCommandsApi } from '../api/executionCommands';
+import { automationsApi } from '../api/automations';
 import { useChatStream } from '../hooks/useChatStream';
 import { clsx } from 'clsx';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { ResultsPanel } from '../components/ResultsPanel';
+import { RunsPanel } from '../components/RunsPanel';
+import { AutomationsPanel } from '../components/AutomationsPanel';
 import { ChatWorkspaceRail } from '../components/ChatWorkspaceRail';
+import { extractExecutionRunIdFromMessage } from '../lib/executionRunLinks';
 import {
     expandComposerCommand,
     getComposerCommandSuggestions,
     parseComposerCommand,
     type ComposerCommandSuggestion,
 } from '../lib/chatComposerCommands';
+import {
+    parseCronCreateArgs,
+    parseGoalRunArgs,
+    parsePipelineRunArgs,
+    parseReasoningRunArgs,
+    parseTriggerCreateArgs,
+} from '../lib/executionCommandParsers';
 import {
     formatWorkspaceEvidenceBlock,
     formatEditorSelectionEvidenceBlock,
@@ -191,11 +203,12 @@ export const Chat = () => {
     const [searchEnabled, setSearchEnabled] = useState(false);
     const [reasoningEnabled, setReasoningEnabled] = useState(false);
     const [selectedSkills, setSelectedSkills] = useState<Skill[]>([]);
-    const [isQuantlabSubmitting, setIsQuantlabSubmitting] = useState(false);
+    const [isExecutionCommandSubmitting, setIsExecutionCommandSubmitting] = useState(false);
     const [activeWorkspaceId, setActiveWorkspaceIdState] = useState<string | null>(() => localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY));
     const [workspaceSelectionTick, setWorkspaceSelectionTick] = useState(0);
     const [isWorkspaceDropdownOpen, setIsWorkspaceDropdownOpen] = useState(false);
-    const [activeSurfaceTab, setActiveSurfaceTab] = useState<'chat' | 'results' | 'code' | 'terminal'>('chat');
+    const [activeSurfaceTab, setActiveSurfaceTab] = useState<'chat' | 'runs' | 'automations' | 'results' | 'code' | 'terminal'>('chat');
+    const [selectedExecutionRunId, setSelectedExecutionRunId] = useState<string | null>(null);
     const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
         const stored = Number(localStorage.getItem(CHAT_SIDEBAR_WIDTH_STORAGE_KEY) || 224);
         return Number.isFinite(stored)
@@ -383,6 +396,11 @@ export const Chat = () => {
             ) || null;
     }, [messages]);
 
+    const latestExecutionRunId = useMemo(
+        () => extractExecutionRunIdFromMessage(latestStructuredResultMessage),
+        [latestStructuredResultMessage],
+    );
+
     useEffect(() => {
         const usedTools = latestStructuredResultMessage?.metadata?.structured_response?.turn_context?.used_tools;
         if (!Array.isArray(usedTools)) {
@@ -422,7 +440,7 @@ export const Chat = () => {
     });
 
     const handleSend = () => {
-        if (!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isQuantlabSubmitting) return;
+        if (!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isExecutionCommandSubmitting) return;
         void handleSendAsync();
     };
 
@@ -441,6 +459,206 @@ export const Chat = () => {
         setActiveSurfaceTab('chat');
         setInput(prompt);
         requestAnimationFrame(() => inputRef.current?.focus());
+    };
+
+    const addOptimisticExecutionMessages = (
+        rawPrompt: string,
+        command: 'quantlab_run' | 'goal_run' | 'reasoning_run' | 'pipeline_run',
+        runningContent: string,
+        inputPayload: Record<string, any>,
+    ) => {
+        if (!activeSessionId) {
+            return { optimisticUserId: 0, optimisticAssistantId: 0, startedAt: new Date().toISOString() };
+        }
+
+        const startedAt = new Date().toISOString();
+        const optimisticUserId = Date.now();
+        const optimisticAssistantId = optimisticUserId + 1;
+
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: optimisticUserId,
+                session_id: activeSessionId,
+                role: 'user',
+                content: rawPrompt,
+                model: null,
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    source: `${command.replace('_run', '')}-slash-command`,
+                    pending: true,
+                }
+            },
+            {
+                id: optimisticAssistantId,
+                session_id: activeSessionId,
+                role: 'assistant',
+                content: runningContent,
+                model: command,
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    pending: true,
+                    execution_command_status: {
+                        command,
+                        status: 'running',
+                        started_at: startedAt,
+                        prompt: rawPrompt,
+                        input: inputPayload,
+                        artifact_count: 0,
+                        error_count: 0,
+                        last_event: 'RUN_STARTED',
+                    },
+                    ...(command === 'quantlab_run' ? {
+                        quantlab_run_status: {
+                            command,
+                            status: 'running',
+                            started_at: startedAt,
+                            prompt: rawPrompt,
+                            input: inputPayload,
+                            artifact_count: 0,
+                            error_count: 0,
+                            last_event: 'SESSION_STARTED',
+                        }
+                    } : {})
+                }
+            }
+        ]);
+
+        return { optimisticUserId, optimisticAssistantId, startedAt };
+    };
+
+    const addOptimisticAutomationMessages = (
+        rawPrompt: string,
+        command: 'cron_create' | 'trigger_create',
+        runningContent: string,
+        inputPayload: Record<string, any>,
+    ) => {
+        if (!activeSessionId) {
+            return { optimisticUserId: 0, optimisticAssistantId: 0, startedAt: new Date().toISOString() };
+        }
+
+        const startedAt = new Date().toISOString();
+        const optimisticUserId = Date.now();
+        const optimisticAssistantId = optimisticUserId + 1;
+
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: optimisticUserId,
+                session_id: activeSessionId,
+                role: 'user',
+                content: rawPrompt,
+                model: null,
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    source: `${command.replace('_create', '')}-create-slash-command`,
+                    pending: true,
+                }
+            },
+            {
+                id: optimisticAssistantId,
+                session_id: activeSessionId,
+                role: 'assistant',
+                content: runningContent,
+                model: command,
+                token_count: null,
+                created_at: startedAt,
+                metadata: {
+                    pending: true,
+                    automation_command_status: {
+                        command,
+                        status: 'running',
+                        started_at: startedAt,
+                        prompt: rawPrompt,
+                        input: inputPayload,
+                        last_event: 'CREATING',
+                    },
+                }
+            }
+        ]);
+
+        return { optimisticUserId, optimisticAssistantId, startedAt };
+    };
+
+    const addExecutionCommandErrorMessage = (
+        command: 'quantlab_run' | 'goal_run' | 'reasoning_run' | 'pipeline_run',
+        rawPrompt: string,
+        inputPayload: Record<string, any>,
+        errorMessage: string,
+        optimisticUserId: number,
+        optimisticAssistantId: number,
+    ) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const finishedAt = new Date().toISOString();
+        setMessages((prev) => [
+            ...prev.filter((message) => message.id !== optimisticAssistantId && message.id !== optimisticUserId),
+            {
+                id: Date.now(),
+                session_id: activeSessionId,
+                role: 'assistant',
+                content: errorMessage,
+                model: command,
+                token_count: null,
+                created_at: finishedAt,
+                metadata: {
+                    execution_command_status: {
+                        command,
+                        status: 'error',
+                        started_at: finishedAt,
+                        finished_at: finishedAt,
+                        prompt: rawPrompt,
+                        input: inputPayload,
+                        artifact_count: 0,
+                        error_count: 1,
+                        last_event: 'RUN_FAILED',
+                    }
+                }
+            }
+        ]);
+    };
+
+    const addAutomationCommandErrorMessage = (
+        command: 'cron_create' | 'trigger_create',
+        rawPrompt: string,
+        inputPayload: Record<string, any>,
+        errorMessage: string,
+        optimisticUserId: number,
+        optimisticAssistantId: number,
+    ) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const finishedAt = new Date().toISOString();
+        setMessages((prev) => [
+            ...prev.filter((message) => message.id !== optimisticAssistantId && message.id !== optimisticUserId),
+            {
+                id: Date.now(),
+                session_id: activeSessionId,
+                role: 'assistant',
+                content: errorMessage,
+                model: command,
+                token_count: null,
+                created_at: finishedAt,
+                metadata: {
+                    automation_command_status: {
+                        command,
+                        status: 'error',
+                        started_at: finishedAt,
+                        finished_at: finishedAt,
+                        prompt: rawPrompt,
+                        input: inputPayload,
+                        last_event: 'CREATE_FAILED',
+                    }
+                }
+            }
+        ]);
     };
 
     const handleQuantlabSlashCommand = async (rawPrompt: string, remainder: string) => {
@@ -467,58 +685,23 @@ export const Chat = () => {
             return;
         }
 
-        const startedAt = new Date().toISOString();
-        const optimisticUserId = Date.now();
-        const optimisticAssistantId = optimisticUserId + 1;
-
-        setIsQuantlabSubmitting(true);
-        setMessages(prev => [
-            ...prev,
-            {
-                id: optimisticUserId,
-                session_id: activeSessionId,
-                role: 'user',
-                content: rawPrompt,
-                model: null,
-                token_count: null,
-                created_at: startedAt,
-                metadata: {
-                    source: 'quantlab-slash-command',
-                    pending: true,
-                }
-            },
-            {
-                id: optimisticAssistantId,
-                session_id: activeSessionId,
-                role: 'assistant',
-                content: 'QuantLab launched. Waiting for report, artifacts, and AI analysis...',
-                model: 'quantlab_run',
-                token_count: null,
-                created_at: startedAt,
-                metadata: {
-                    pending: true,
-                    quantlab_run_status: {
-                        command: 'quantlab_run',
-                        status: 'running',
-                        started_at: startedAt,
-                        prompt: rawPrompt,
-                        input: {
-                            strategy: parsed.payload.strategy,
-                            ticker: parsed.payload.ticker,
-                            start: parsed.payload.start,
-                            end: parsed.payload.end,
-                            interval: parsed.payload.interval,
-                            rsi_buy_max: parsed.payload.rsi_buy_max,
-                            rsi_sell_min: parsed.payload.rsi_sell_min,
-                            cooldown_days: parsed.payload.cooldown_days,
-                        },
-                        artifact_count: 0,
-                        error_count: 0,
-                        last_event: 'SESSION_STARTED',
-                    }
-                }
-            }
-        ]);
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = {
+            strategy: parsed.payload.strategy,
+            ticker: parsed.payload.ticker,
+            start: parsed.payload.start,
+            end: parsed.payload.end,
+            interval: parsed.payload.interval,
+            rsi_buy_max: parsed.payload.rsi_buy_max,
+            rsi_sell_min: parsed.payload.rsi_sell_min,
+            cooldown_days: parsed.payload.cooldown_days,
+        };
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticExecutionMessages(
+            rawPrompt,
+            'quantlab_run',
+            'QuantLab launched. Waiting for report, artifacts, and AI analysis...',
+            inputPayload,
+        );
         setActiveSurfaceTab('chat');
         setInput('');
         setSelectedSkills([]);
@@ -544,44 +727,359 @@ export const Chat = () => {
             });
             const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
             setMessages(canonicalMessages);
-            setIsQuantlabSubmitting(false);
+            setIsExecutionCommandSubmitting(false);
         } catch (error: any) {
-            setMessages(prev => [
-                ...prev.filter((message) => message.id !== optimisticAssistantId && message.id !== optimisticUserId),
+            addExecutionCommandErrorMessage(
+                'quantlab_run',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'QuantLab execution failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
+            setActiveSurfaceTab('chat');
+            setIsExecutionCommandSubmitting(false);
+        }
+    };
+
+    const handleGoalSlashCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parseGoalRunArgs(remainder);
+        if (!parsed.ok) {
+            setMessages((prev) => [
+                ...prev,
                 {
                     id: Date.now(),
                     session_id: activeSessionId,
                     role: 'assistant',
-                    content: error?.response?.data || error?.message || 'QuantLab execution failed.',
-                    model: 'quantlab_run',
+                    content: parsed.error,
+                    model: 'goal_run',
                     token_count: null,
                     created_at: new Date().toISOString(),
-                    metadata: {
-                        quantlab_run_status: {
-                            command: 'quantlab_run',
-                            status: 'error',
-                            started_at: new Date().toISOString(),
-                            finished_at: new Date().toISOString(),
-                            prompt: rawPrompt,
-                            input: {
-                                strategy: parsed.payload.strategy,
-                                ticker: parsed.payload.ticker,
-                                start: parsed.payload.start,
-                                end: parsed.payload.end,
-                                interval: parsed.payload.interval,
-                                rsi_buy_max: parsed.payload.rsi_buy_max,
-                                rsi_sell_min: parsed.payload.rsi_sell_min,
-                                cooldown_days: parsed.payload.cooldown_days,
-                            },
-                            artifact_count: 0,
-                            error_count: 1,
-                            last_event: 'SESSION_FAILED',
-                        }
-                    }
+                    metadata: {}
                 }
             ]);
+            return;
+        }
+
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = { goal: parsed.payload.goal };
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticExecutionMessages(
+            rawPrompt,
+            'goal_run',
+            'Goal launched. Waiting for execution state, results, and analysis...',
+            inputPayload,
+        );
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'goal-slash-command'
+                }
+            });
+            const response = await executionCommandsApi.runGoal(activeSessionId, {
+                prompt: rawPrompt,
+                goal: parsed.payload.goal,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            setSelectedExecutionRunId(response.run_id);
+            setActiveSurfaceTab('results');
+            setIsExecutionCommandSubmitting(false);
+        } catch (error: any) {
+            addExecutionCommandErrorMessage(
+                'goal_run',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'Goal execution failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
             setActiveSurfaceTab('chat');
-            setIsQuantlabSubmitting(false);
+            setIsExecutionCommandSubmitting(false);
+        }
+    };
+
+    const handleReasoningSlashCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parseReasoningRunArgs(remainder);
+        if (!parsed.ok) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: parsed.error,
+                    model: 'reasoning_run',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {}
+                }
+            ]);
+            return;
+        }
+
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = {
+            question: parsed.payload.prompt,
+            max_tokens: parsed.payload.max_tokens,
+        };
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticExecutionMessages(
+            rawPrompt,
+            'reasoning_run',
+            'Reasoning graph launched. Waiting for node outputs and analysis...',
+            inputPayload,
+        );
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'reasoning-slash-command'
+                }
+            });
+            const response = await executionCommandsApi.runReasoning(activeSessionId, {
+                prompt: rawPrompt,
+                question: parsed.payload.prompt,
+                max_tokens: parsed.payload.max_tokens,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            setSelectedExecutionRunId(response.run_id);
+            setActiveSurfaceTab('results');
+            setIsExecutionCommandSubmitting(false);
+        } catch (error: any) {
+            addExecutionCommandErrorMessage(
+                'reasoning_run',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'Reasoning execution failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
+            setActiveSurfaceTab('chat');
+            setIsExecutionCommandSubmitting(false);
+        }
+    };
+
+    const handlePipelineSlashCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parsePipelineRunArgs(remainder);
+        if (!parsed.ok) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: parsed.error,
+                    model: 'pipeline_run',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {}
+                }
+            ]);
+            return;
+        }
+
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = {
+            pipeline_id: parsed.payload.pipeline_id,
+            pipeline_name: parsed.payload.pipeline_name,
+            question: parsed.payload.question,
+        };
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticExecutionMessages(
+            rawPrompt,
+            'pipeline_run',
+            'Pipeline launched. Waiting for trace, artifacts, and analysis...',
+            inputPayload,
+        );
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'pipeline-slash-command'
+                }
+            });
+            const response = await executionCommandsApi.runPipeline(activeSessionId, {
+                prompt: rawPrompt,
+                pipeline_id: parsed.payload.pipeline_id,
+                pipeline_name: parsed.payload.pipeline_name,
+                question: parsed.payload.question,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            setSelectedExecutionRunId(response.run_id);
+            setActiveSurfaceTab('results');
+            setIsExecutionCommandSubmitting(false);
+        } catch (error: any) {
+            addExecutionCommandErrorMessage(
+                'pipeline_run',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'Pipeline execution failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
+            setActiveSurfaceTab('chat');
+            setIsExecutionCommandSubmitting(false);
+        }
+    };
+
+    const handleCronCreateCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parseCronCreateArgs(remainder);
+        if (!parsed.ok) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: parsed.error,
+                    model: 'cron_create',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {}
+                }
+            ]);
+            return;
+        }
+
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = parsed.payload;
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticAutomationMessages(
+            rawPrompt,
+            'cron_create',
+            'Creating cron job in stepbit-core and preparing the Automations surface...',
+            inputPayload,
+        );
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'cron-create-slash-command'
+                }
+            });
+            await automationsApi.createCronJob(activeSessionId, {
+                prompt: rawPrompt,
+                ...parsed.payload,
+                enabled: parsed.payload.enabled ?? false,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            await queryClient.invalidateQueries({ queryKey: ['automations'] });
+            setActiveSurfaceTab('automations');
+            setIsExecutionCommandSubmitting(false);
+        } catch (error: any) {
+            addAutomationCommandErrorMessage(
+                'cron_create',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'Cron creation failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
+            setActiveSurfaceTab('chat');
+            setIsExecutionCommandSubmitting(false);
+        }
+    };
+
+    const handleTriggerCreateCommand = async (rawPrompt: string, remainder: string) => {
+        if (!activeSessionId) {
+            return;
+        }
+
+        const parsed = parseTriggerCreateArgs(remainder);
+        if (!parsed.ok) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    session_id: activeSessionId,
+                    role: 'assistant',
+                    content: parsed.error,
+                    model: 'trigger_create',
+                    token_count: null,
+                    created_at: new Date().toISOString(),
+                    metadata: {}
+                }
+            ]);
+            return;
+        }
+
+        setIsExecutionCommandSubmitting(true);
+        const inputPayload = parsed.payload;
+        const { optimisticUserId, optimisticAssistantId } = addOptimisticAutomationMessages(
+            rawPrompt,
+            'trigger_create',
+            'Creating trigger in stepbit-core and refreshing the Automations surface...',
+            inputPayload,
+        );
+        setActiveSurfaceTab('chat');
+        setInput('');
+        setSelectedSkills([]);
+
+        try {
+            await sessionsApi.addMessage(activeSessionId, {
+                role: 'user',
+                content: rawPrompt,
+                metadata: {
+                    source: 'trigger-create-slash-command'
+                }
+            });
+            await automationsApi.createTrigger(activeSessionId, {
+                prompt: rawPrompt,
+                ...parsed.payload,
+            });
+            const canonicalMessages = await sessionsApi.getMessages(activeSessionId);
+            setMessages(canonicalMessages);
+            await queryClient.invalidateQueries({ queryKey: ['automations'] });
+            setActiveSurfaceTab('automations');
+            setIsExecutionCommandSubmitting(false);
+        } catch (error: any) {
+            addAutomationCommandErrorMessage(
+                'trigger_create',
+                rawPrompt,
+                inputPayload,
+                error?.response?.data || error?.message || 'Trigger creation failed.',
+                optimisticUserId,
+                optimisticAssistantId,
+            );
+            setActiveSurfaceTab('chat');
+            setIsExecutionCommandSubmitting(false);
         }
     };
 
@@ -594,6 +1092,26 @@ export const Chat = () => {
         const parsedCommand = parseComposerCommand(finalMessage);
         if (parsedCommand?.id === 'quantlabRun') {
             await handleQuantlabSlashCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
+        if (parsedCommand?.id === 'goalRun') {
+            await handleGoalSlashCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
+        if (parsedCommand?.id === 'reasoningRun') {
+            await handleReasoningSlashCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
+        if (parsedCommand?.id === 'pipelineRun') {
+            await handlePipelineSlashCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
+        if (parsedCommand?.id === 'cronCreate') {
+            await handleCronCreateCommand(finalMessage, parsedCommand.remainder);
+            return;
+        }
+        if (parsedCommand?.id === 'triggerCreate') {
+            await handleTriggerCreateCommand(finalMessage, parsedCommand.remainder);
             return;
         }
         const workspaceId = activeWorkspaceId || localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
@@ -869,7 +1387,7 @@ export const Chat = () => {
                             </div>
                             <div className="flex items-center gap-2">
                                 <div className="inline-flex rounded-sm border border-gruv-dark-4/30 bg-gruv-dark-3/30 p-0.5">
-                                    {(['chat', 'results', 'code', 'terminal'] as const).map((tab) => (
+                                    {(['chat', 'runs', 'automations', 'results', 'code', 'terminal'] as const).map((tab) => (
                                         <button
                                             key={tab}
                                             type="button"
@@ -1000,16 +1518,20 @@ export const Chat = () => {
                                                     <pre className="whitespace-pre-wrap font-mono text-[12px] leading-5 text-gruv-light-3">
                                                         {m.content}
                                                     </pre>
-                                                ) : m.role === 'assistant' && m.metadata?.quantlab_run_status?.status === 'running' ? (
+                                                ) : m.role === 'assistant' && ((m.metadata?.execution_command_status?.status === 'running') || (m.metadata?.automation_command_status?.status === 'running')) ? (
                                                     <div className="min-w-[22rem] space-y-4">
+                                                        {(() => {
+                                                            const commandStatus = m.metadata?.execution_command_status || m.metadata?.automation_command_status;
+                                                            return (
+                                                        <>
                                                         <div className="overflow-hidden rounded-sm border border-monokai-aqua/20 bg-[radial-gradient(circle_at_top,_rgba(102,217,239,0.18),_transparent_45%),linear-gradient(180deg,rgba(40,40,40,0.9),rgba(29,32,33,0.95))] p-4">
                                                             <div className="flex items-center justify-between gap-3">
                                                                 <div>
                                                                     <div className="text-[12px] font-mono uppercase tracking-[0.22em] text-monokai-aqua">
-                                                                        QuantLab Running
+                                                                        {executionCommandTitle(commandStatus?.command)}
                                                                     </div>
                                                                     <div className="mt-1 text-[12px] text-gruv-light-3">
-                                                                        Lanzado, ejecutando backtest y esperando artifacts.
+                                                                        {executionCommandSubtitle(commandStatus?.command)}
                                                                     </div>
                                                                 </div>
                                                                 <div className="relative flex h-16 w-16 items-center justify-center">
@@ -1036,51 +1558,56 @@ export const Chat = () => {
                                                                     <div className="h-full w-1/3 animate-[pulse_1.8s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-monokai-aqua via-monokai-green to-monokai-orange" />
                                                                 </div>
                                                                 <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.16em] text-gruv-light-4">
-                                                                    <span className="inline-flex items-center gap-1">
-                                                                        <BarChart3 className="h-3 w-3 text-monokai-aqua" />
-                                                                        Backtest
-                                                                    </span>
-                                                                    <span className="inline-flex items-center gap-1">
-                                                                        <Brain className="h-3 w-3 text-monokai-green" />
-                                                                        Summary
-                                                                    </span>
-                                                                    <span className="inline-flex items-center gap-1">
-                                                                        <Globe className="h-3 w-3 text-monokai-orange" />
-                                                                        Results
-                                                                    </span>
+                                                                    {executionCommandPhases(commandStatus?.command).map((phase) => (
+                                                                        <span key={phase.label} className="inline-flex items-center gap-1">
+                                                                            {phase.icon}
+                                                                            {phase.label}
+                                                                        </span>
+                                                                    ))}
                                                                 </div>
                                                             </div>
                                                         </div>
                                                         <div className="grid gap-2 text-[11px] text-gruv-light-3 md:grid-cols-2">
-                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
-                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Strategy</div>
-                                                                <div className="mt-1 text-gruv-light-1">{m.metadata?.quantlab_run_status?.input?.strategy || 'n/a'}</div>
-                                                            </div>
-                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
-                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Ticker</div>
-                                                                <div className="mt-1 text-gruv-light-1">{m.metadata?.quantlab_run_status?.input?.ticker || 'n/a'}</div>
-                                                            </div>
-                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
-                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Range</div>
-                                                                <div className="mt-1 text-gruv-light-1">
-                                                                    {m.metadata?.quantlab_run_status?.input?.start || 'n/a'} to {m.metadata?.quantlab_run_status?.input?.end || 'n/a'}
+                                                            {executionCommandDetails(commandStatus).map((detail) => (
+                                                                <div
+                                                                    key={detail.label}
+                                                                    className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2"
+                                                                >
+                                                                    <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">{detail.label}</div>
+                                                                    <div className="mt-1 text-gruv-light-1">{detail.value}</div>
                                                                 </div>
-                                                            </div>
-                                                            <div className="rounded-sm border border-gruv-dark-4/20 bg-gruv-dark-3/30 px-3 py-2">
-                                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-gruv-light-4">Params</div>
-                                                                <div className="mt-1 text-gruv-light-1">
-                                                                    RSI buy {m.metadata?.quantlab_run_status?.input?.rsi_buy_max ?? 'default'}
-                                                                    {' / '}
-                                                                    RSI sell {m.metadata?.quantlab_run_status?.input?.rsi_sell_min ?? 'default'}
-                                                                    {' / '}
-                                                                    cooldown {m.metadata?.quantlab_run_status?.input?.cooldown_days ?? 'default'}
-                                                                </div>
-                                                            </div>
+                                                            ))}
                                                         </div>
+                                                        </>
+                                                            );
+                                                        })()}
                                                     </div>
                                                 ) : (
                                                     <MarkdownContent content={m.content} />
                                                 )}
+                                                {m.role === 'assistant' && (() => {
+                                                    const executionRunId = extractExecutionRunIdFromMessage(m);
+                                                    if (!executionRunId) {
+                                                        return null;
+                                                    }
+
+                                                    return (
+                                                        <div className="mt-3 flex items-center gap-2 border-t border-gruv-dark-4/20 pt-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setSelectedExecutionRunId(executionRunId);
+                                                                    setActiveSurfaceTab('runs');
+                                                                }}
+                                                                className="inline-flex items-center gap-1.5 rounded-sm border border-monokai-aqua/20 bg-monokai-aqua/10 px-2 py-1 text-[10px] font-mono uppercase tracking-[0.16em] text-monokai-aqua transition-colors hover:bg-monokai-aqua/15"
+                                                            >
+                                                                <Workflow className="h-3 w-3" />
+                                                                Open Run
+                                                            </button>
+                                                            <span className="text-[10px] text-gruv-light-4">{executionRunId}</span>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     ))}
@@ -1105,6 +1632,22 @@ export const Chat = () => {
                                         </div>
                                     )}
                                     <div ref={messagesEndRef} />
+                                </div>
+                            ) : activeSurfaceTab === 'runs' ? (
+                                <div className="min-h-0 flex-1 overflow-hidden">
+                                    <RunsPanel
+                                        selectedRunId={selectedExecutionRunId || latestExecutionRunId}
+                                        onSelectRun={setSelectedExecutionRunId}
+                                    />
+                                </div>
+                            ) : activeSurfaceTab === 'automations' ? (
+                                <div className="min-h-0 flex-1 overflow-hidden">
+                                    <AutomationsPanel
+                                        onOpenRun={(runId) => {
+                                            setSelectedExecutionRunId(runId);
+                                            setActiveSurfaceTab('runs');
+                                        }}
+                                    />
                                 </div>
                             ) : activeSurfaceTab === 'results' ? (
                                 <div className="min-h-0 flex-1 overflow-hidden">
@@ -1269,10 +1812,10 @@ export const Chat = () => {
                                     />
                                     <button
                                         onClick={handleSend}
-                                        disabled={!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isQuantlabSubmitting}
+                                        disabled={!input.trim() || (activeSurfaceTab === 'chat' && isStreaming) || isExecutionCommandSubmitting}
                                         className="absolute right-2 bottom-2 p-1.5 bg-monokai-pink text-white rounded-sm disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110 transition-all shadow-sm"
                                     >
-                                        {isQuantlabSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                                        {isExecutionCommandSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                                     </button>
                                     {activeSurfaceTab === 'chat' && (isWaiting || isStreaming) && (
                                         <button
@@ -1441,6 +1984,118 @@ export const Chat = () => {
         </div>
     );
 };
+
+function executionCommandTitle(command?: string) {
+    switch (command) {
+        case 'quantlab_run':
+            return 'QuantLab Running';
+        case 'goal_run':
+            return 'Goal Running';
+        case 'reasoning_run':
+            return 'Reasoning Running';
+        case 'pipeline_run':
+            return 'Pipeline Running';
+        case 'cron_create':
+            return 'Creating Cron Job';
+        case 'trigger_create':
+            return 'Creating Trigger';
+        default:
+            return 'Execution Running';
+    }
+}
+
+function executionCommandSubtitle(command?: string) {
+    switch (command) {
+        case 'quantlab_run':
+            return 'Lanzado, ejecutando backtest y esperando artifacts.';
+        case 'goal_run':
+            return 'Objetivo enviado a stepbit-core y esperando resultados estructurados.';
+        case 'reasoning_run':
+            return 'Grafo de reasoning en ejecucion, esperando nodos y resumen final.';
+        case 'pipeline_run':
+            return 'Pipeline ejecutandose con traza, tool calls y artifacts.';
+        case 'cron_create':
+            return 'Registrando un cron job persistente y preparando la superficie de Automations.';
+        case 'trigger_create':
+            return 'Registrando un trigger persistente y conectandolo con el runtime de eventos.';
+        default:
+            return 'Ejecucion en progreso.';
+    }
+}
+
+function executionCommandPhases(command?: string): Array<{ label: string; icon: ReactElement }> {
+    switch (command) {
+        case 'cron_create':
+            return [
+                { label: 'Schedule', icon: <BarChart3 className="h-3 w-3 text-monokai-aqua" /> },
+                { label: 'Persist', icon: <Brain className="h-3 w-3 text-monokai-green" /> },
+                { label: 'Automations', icon: <Workflow className="h-3 w-3 text-monokai-orange" /> },
+            ];
+        case 'trigger_create':
+            return [
+                { label: 'Event', icon: <Globe className="h-3 w-3 text-monokai-aqua" /> },
+                { label: 'Dispatch', icon: <Brain className="h-3 w-3 text-monokai-green" /> },
+                { label: 'Automations', icon: <Workflow className="h-3 w-3 text-monokai-orange" /> },
+            ];
+        default:
+            return [
+                { label: 'Backtest', icon: <BarChart3 className="h-3 w-3 text-monokai-aqua" /> },
+                { label: 'Summary', icon: <Brain className="h-3 w-3 text-monokai-green" /> },
+                { label: 'Results', icon: <Globe className="h-3 w-3 text-monokai-orange" /> },
+            ];
+    }
+}
+
+function executionCommandDetails(status?: Record<string, any> | null): Array<{ label: string; value: string }> {
+    if (!status) {
+        return [];
+    }
+
+    const input = status.input || {};
+    switch (status.command) {
+        case 'quantlab_run':
+            return [
+                { label: 'Strategy', value: input.strategy || 'n/a' },
+                { label: 'Ticker', value: input.ticker || 'n/a' },
+                { label: 'Range', value: `${input.start || 'n/a'} to ${input.end || 'n/a'}` },
+                {
+                    label: 'Params',
+                    value: `RSI buy ${input.rsi_buy_max ?? 'default'} / RSI sell ${input.rsi_sell_min ?? 'default'} / cooldown ${input.cooldown_days ?? 'default'}`,
+                },
+            ];
+        case 'goal_run':
+            return [{ label: 'Goal', value: input.goal || 'n/a' }];
+        case 'reasoning_run':
+            return [
+                { label: 'Prompt', value: input.question || 'n/a' },
+                { label: 'Max tokens', value: String(input.max_tokens ?? 384) },
+            ];
+        case 'pipeline_run':
+            return [
+                { label: 'Pipeline', value: input.pipeline_name || input.pipeline_id?.toString() || 'n/a' },
+                { label: 'Question', value: input.question || 'n/a' },
+            ];
+        case 'cron_create':
+            return [
+                { label: 'Job ID', value: input.job_id || 'n/a' },
+                { label: 'Schedule', value: input.schedule || 'n/a' },
+                { label: 'Execution', value: input.execution_type || 'n/a' },
+                { label: 'Target', value: input.goal || input.reasoning_prompt || input.pipeline_name || input.pipeline_id?.toString() || 'n/a' },
+            ];
+        case 'trigger_create':
+            return [
+                { label: 'Trigger ID', value: input.trigger_id || 'n/a' },
+                { label: 'Event', value: input.event_type || 'n/a' },
+                { label: 'Action', value: input.action_kind || 'n/a' },
+                { label: 'Target', value: input.goal || input.reasoning_prompt || input.pipeline_name || input.pipeline_id?.toString() || 'n/a' },
+            ];
+        default:
+            return Object.entries(input).slice(0, 4).map(([label, value]) => ({
+                label,
+                value: typeof value === 'string' ? value : JSON.stringify(value),
+            }));
+    }
+}
 
 function parseQuantlabRunArgs(input: string): {
     ok: true;

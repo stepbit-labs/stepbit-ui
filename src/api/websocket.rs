@@ -375,7 +375,7 @@ async fn handle_chat_message(
         system_prompt: Some(final_prompt),
         tools: Some(tool_definitions),
         user: Some(session_id.to_string()),
-        max_tokens: Some(4096), // Increase default to prevent cut-off
+        max_tokens: Some(4096),
         ..Default::default()
     };
 

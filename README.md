@@ -96,4 +96,8 @@ Build and execute structured AI workflows with deterministic stages. Monitor eve
 - **[Project Journey](JOURNEY.md)**: Roadmap & vision board for the future.
 - **[API Guide](API_GUIDE.md)**: Detailed REST & WebSocket endpoint documentation.
 
+## License
+
+Apache-2.0. LLM providers, MCP servers, and other external services are separate components and may use their own licenses; this license applies to the Stepbit application source in this repository.
+
 Built with 🦀 and 🎨 for those who care about the details.

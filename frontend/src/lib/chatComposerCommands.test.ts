@@ -36,5 +36,18 @@ describe('chatComposerCommands', () => {
 
   it('supports the task command catalog', () => {
     expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/task');
+    expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/goal-run');
+    expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/reasoning-run');
+    expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/pipeline-run');
+    expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/cron-create');
+    expect(COMPOSER_COMMANDS.map((command) => command.trigger)).toContain('/trigger-create');
+  });
+
+  it('expands execution commands into concrete templates', () => {
+    expect(expandComposerCommand(parseComposerCommand('/goal-run')!)).toContain('/goal-run');
+    expect(expandComposerCommand(parseComposerCommand('/reasoning-run')!)).toContain('max_tokens=384');
+    expect(expandComposerCommand(parseComposerCommand('/pipeline-run')!)).toContain('question=');
+    expect(expandComposerCommand(parseComposerCommand('/cron-create')!)).toContain('schedule=');
+    expect(expandComposerCommand(parseComposerCommand('/trigger-create')!)).toContain('event=');
   });
 });

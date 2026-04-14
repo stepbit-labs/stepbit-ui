@@ -67,6 +67,31 @@ export interface QuantlabRunStatusMetadata {
   last_event?: string | null;
 }
 
+export interface ExecutionCommandStatusMetadata {
+  command: 'quantlab_run' | 'goal_run' | 'reasoning_run' | 'pipeline_run';
+  status: 'running' | 'success' | 'error';
+  started_at: string;
+  finished_at?: string | null;
+  prompt?: string | null;
+  input?: Record<string, any> | null;
+  run_id?: string | null;
+  artifact_count?: number | null;
+  error_count?: number | null;
+  last_event?: string | null;
+}
+
+export interface AutomationCommandStatusMetadata {
+  command: 'cron_create' | 'trigger_create';
+  status: 'running' | 'success' | 'error';
+  started_at: string;
+  finished_at?: string | null;
+  prompt?: string | null;
+  input?: Record<string, any> | null;
+  automation_id?: string | null;
+  automation_kind?: 'cron_job' | 'trigger' | null;
+  last_event?: string | null;
+}
+
 export interface CreateSessionRequest {
   name: string;
   metadata?: Record<string, any>;
@@ -195,4 +220,187 @@ export interface QuantlabRunRequest {
   cooldown_days?: number | null;
   timeout_seconds?: number | null;
   run_label?: string | null;
+}
+
+export interface GoalRunRequest {
+  prompt: string;
+  goal: string;
+}
+
+export interface ReasoningRunRequest {
+  prompt: string;
+  question: string;
+  max_tokens?: number | null;
+}
+
+export interface PipelineRunRequest {
+  prompt: string;
+  pipeline_id?: number | null;
+  pipeline_name?: string | null;
+  question: string;
+}
+
+export interface ExecutionCommandResponse {
+  message_id: number;
+  run_id: string;
+  summary: string;
+  structured_response: StructuredResponseEnvelope & {
+    metadata?: Record<string, any>;
+  };
+}
+
+export type AutomationExecutionType = 'Goal' | 'ReasoningGraph' | 'Pipeline';
+export type AutomationActionKind = 'goal' | 'reasoning' | 'pipeline';
+export type AutomationConditionOperator = 'equals' | 'contains' | 'gt' | 'lt';
+export type RetryBackoffStrategy = 'Fixed' | 'Exponential';
+
+export interface RetryPolicy {
+  max_retries: number;
+  backoff_strategy: RetryBackoffStrategy;
+  initial_delay_seconds: number;
+}
+
+export interface CronCreateRequest {
+  prompt: string;
+  job_id: string;
+  schedule: string;
+  execution_type: AutomationExecutionType;
+  enabled?: boolean | null;
+  goal?: string | null;
+  reasoning_prompt?: string | null;
+  max_tokens?: number | null;
+  pipeline_id?: number | null;
+  pipeline_name?: string | null;
+  input_json?: Record<string, any> | null;
+  retry_policy?: RetryPolicy | null;
+}
+
+export type TriggerCondition =
+  | { Equals: { path: string; value: unknown } }
+  | { Contains: { path: string; value: unknown } }
+  | { GreaterThan: { path: string; value: unknown } }
+  | { LessThan: { path: string; value: unknown } }
+  | { And: TriggerCondition[] }
+  | { Or: TriggerCondition[] }
+  | { Not: TriggerCondition };
+
+export type TriggerAction =
+  | { Goal: { goal: string } }
+  | { ReasoningGraph: { graph: Record<string, any> } }
+  | { Pipeline: { pipeline: Record<string, any> } };
+
+export interface TriggerCreateRequest {
+  prompt: string;
+  trigger_id: string;
+  event_type: string;
+  action_kind: AutomationActionKind;
+  goal?: string | null;
+  reasoning_prompt?: string | null;
+  max_tokens?: number | null;
+  pipeline_id?: number | null;
+  pipeline_name?: string | null;
+  condition?: TriggerCondition | null;
+}
+
+export interface AutomationCommandResponse {
+  message_id: number;
+  automation_id: string;
+  automation_kind: 'cron_job' | 'trigger';
+  summary: string;
+  metadata: Record<string, any>;
+}
+
+export type ExecutionKind = 'goal' | 'pipeline' | 'reasoning' | 'cron_job' | 'trigger';
+export type ExecutionStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type ExecutionStepStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface ExecutionLinks {
+  goal_run_id?: string | null;
+  response_id?: string | null;
+  cron_job_id?: string | null;
+  trigger_id?: string | null;
+}
+
+export interface ExecutionStep {
+  id: string;
+  kind: string;
+  title: string;
+  status: ExecutionStepStatus;
+  created_at: number;
+  updated_at: number;
+  summary?: string | null;
+  payload?: Record<string, any> | null;
+}
+
+export interface ExecutionArtifact {
+  id: string;
+  family: string;
+  title: string;
+  source?: string | null;
+  data: Record<string, any>;
+}
+
+export interface ExecutionEvent {
+  id: string;
+  run_id: string;
+  event_type: string;
+  timestamp: number;
+  payload?: Record<string, any> | null;
+}
+
+export interface ExecutionRun {
+  id: string;
+  kind: ExecutionKind;
+  parent_id?: string | null;
+  title: string;
+  status: ExecutionStatus;
+  created_at: number;
+  updated_at: number;
+  summary?: string | null;
+  results?: Record<string, any> | null;
+  error?: string | null;
+  tags: string[];
+  links?: ExecutionLinks;
+  steps: ExecutionStep[];
+  artifacts: ExecutionArtifact[];
+}
+
+export interface CronStatus {
+  scheduler_running: boolean;
+  total_jobs: number;
+  failing_jobs: number;
+  retrying_jobs: number;
+}
+
+export interface CronJob {
+  id: string;
+  schedule: string;
+  execution_type: AutomationExecutionType;
+  payload: Record<string, any>;
+  enabled: boolean;
+  failure_count: number;
+  last_failure_at?: number | null;
+  next_retry_at?: number | null;
+  last_run_at?: number | null;
+  retry_policy?: RetryPolicy | null;
+}
+
+export interface TriggerDefinition {
+  id: string;
+  event_type: string;
+  condition?: TriggerCondition | null;
+  action: TriggerAction;
+}
+
+export interface RecentAutomationEvent {
+  id: string;
+  event_type: string;
+  payload: Record<string, any>;
+  timestamp: string;
+  source_node?: string | null;
+  related_execution_id?: string | null;
+  related_goal_run_id?: string | null;
+  related_response_id?: string | null;
+  related_cron_job_id?: string | null;
+  related_trigger_id?: string | null;
 }
