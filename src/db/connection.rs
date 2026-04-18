@@ -1,74 +1,71 @@
 use crate::config::DatabaseConfig;
-use duckdb::{Connection, Result as DbResult};
+use rusqlite::{Connection, Result as DbResult};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
 pub type DbPool = Arc<Mutex<Connection>>;
 
 pub const SCHEMA: &str = r#"
-CREATE SEQUENCE IF NOT EXISTS seq_messages_id;
-CREATE SEQUENCE IF NOT EXISTS seq_tool_results_id;
-
 CREATE TABLE IF NOT EXISTS sessions (
-    id UUID PRIMARY KEY,
-    name VARCHAR,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON DEFAULT '{}'
+    id         TEXT PRIMARY KEY,
+    name       TEXT,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    metadata   TEXT DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id BIGINT PRIMARY KEY DEFAULT nextval('seq_messages_id'),
-    session_id UUID,
-    role VARCHAR NOT NULL,
-    content TEXT NOT NULL,
-    model VARCHAR,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT,
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    model       TEXT,
     token_count INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON DEFAULT '{}'
+    created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    metadata    TEXT DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS tool_results (
-    id BIGINT PRIMARY KEY DEFAULT nextval('seq_tool_results_id'),
-    session_id UUID,
-    source_url VARCHAR,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    source_url TEXT,
+    content    TEXT NOT NULL,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(session_id);
 
-CREATE SEQUENCE IF NOT EXISTS seq_skills_id;
-
 CREATE TABLE IF NOT EXISTS skills (
-    id         BIGINT PRIMARY KEY DEFAULT nextval('seq_skills_id'),
-    name       VARCHAR NOT NULL,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
     content    TEXT NOT NULL,
-    tags       VARCHAR DEFAULT '',
-    source_url VARCHAR,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    tags       TEXT DEFAULT '',
+    source_url TEXT,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
-CREATE SEQUENCE IF NOT EXISTS seq_pipelines_id;
-
 CREATE TABLE IF NOT EXISTS pipelines (
-    id BIGINT PRIMARY KEY DEFAULT nextval('seq_pipelines_id'),
-    name VARCHAR NOT NULL,
-    definition JSON NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    definition TEXT NOT NULL,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 "#;
 
 pub fn get_connection(config: &DatabaseConfig) -> DbResult<DbPool> {
-    info!("Connecting to DuckDB at {}", config.path);
-    let conn = Connection::open(&config.path)?;
-    
+    info!("Connecting to SQLite at {}", config.path);
+    let conn = if config.path == ":memory:" {
+        Connection::open_in_memory()?
+    } else {
+        Connection::open(&config.path)?
+    };
+
     init_schema(&conn)?;
-    
+
     Ok(Arc::new(Mutex::new(conn)))
 }
 

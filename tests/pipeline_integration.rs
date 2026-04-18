@@ -1,23 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use stepbit::db::connection::{SCHEMA};
-    use stepbit::db::service::DbService;
+    use rusqlite::Connection;
     use serde_json::json;
+    use stepbit::db::connection::SCHEMA;
+    use stepbit::db::service::DbService;
 
-    fn setup_test_db() -> duckdb::Connection {
-        let conn = duckdb::Connection::open_in_memory().unwrap();
+    fn setup_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        // Add pipelines table if it doesn't exist yet (we'll add it to SCHEMA later)
-        conn.execute_batch("
-            CREATE SEQUENCE IF NOT EXISTS seq_pipelines_id;
-            CREATE TABLE IF NOT EXISTS pipelines (
-                id BIGINT PRIMARY KEY DEFAULT nextval('seq_pipelines_id'),
-                name VARCHAR NOT NULL,
-                definition JSON NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        ").unwrap();
         conn
     }
 
@@ -51,14 +41,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_execution_orchestration() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use stepbit::llm::stepbit_core::StepbitCoreProvider;
         use stepbit::llm::LlmProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
-        let provider = StepbitCoreProvider::new(mock_server.uri(), "phi-4".to_string(), None);
-        
+        let provider =
+            StepbitCoreProvider::new(mock_server.uri(), "phi-4".to_string(), None);
+
         Mock::given(method("POST"))
             .and(path("/v1/pipelines/execute"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -71,8 +62,11 @@ mod tests {
             .await;
 
         let definition = json!({ "name": "test", "stages": [] });
-        let result = provider.execute_pipeline(definition, "What is the revenue?".to_string()).await.unwrap();
-        
+        let result = provider
+            .execute_pipeline(definition, "What is the revenue?".to_string())
+            .await
+            .unwrap();
+
         assert_eq!(result.final_answer, "The revenue is $1M");
         assert_eq!(result.trace.len(), 1);
     }

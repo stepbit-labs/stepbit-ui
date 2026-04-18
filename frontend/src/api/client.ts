@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+// Siempre usa la URL relativa — el proxy de Vite (dev) o el servidor
+// estático (prod) reenvían /api al backend sin necesidad de CORS.
 const api = axios.create({
-  baseURL: (import.meta.env.VITE_API_BASE_URL || '/api')
+  baseURL: '/api',
 });
 
 api.interceptors.request.use((config) => {

@@ -1,6 +1,6 @@
-use crate::db::models::{Message, Session, Skill, ToolResult, Pipeline};
+use crate::db::models::{Message, Pipeline, Session, Skill, ToolResult};
 use chrono::{DateTime, Utc};
-use duckdb::{params, params_from_iter, Connection, Result as DbResult, Row};
+use rusqlite::{params, params_from_iter, types::Value, Connection, Result as DbResult, Row};
 use uuid::Uuid;
 
 pub struct DbService;
@@ -9,23 +9,10 @@ impl DbService {
     fn row_to_session(row: &Row) -> DbResult<Session> {
         let meta_str: String = row.get(4)?;
         let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
-        
-        // DuckDB timestamp parsing helper
-        let created_val: duckdb::types::Value = row.get(2)?;
-        let updated_val: duckdb::types::Value = row.get(3)?;
-        
-        let created_str = match created_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-        let updated_str = match updated_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
 
-        // NOTE: if DuckDB returns a raw timestamp we can't extract the text cleanly because we're not using the chrono feature of duckdb.
-        // Instead of fighting the DB driver in tests vs prod we'll just query the timestamps AS text in our SELECT statements.
-        
+        let created_str: String = row.get(2)?;
+        let updated_str: String = row.get(3)?;
+
         let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
         let updated_at = updated_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
 
@@ -42,11 +29,7 @@ impl DbService {
         let meta_str: String = row.get(7)?;
         let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
 
-        let created_val: duckdb::types::Value = row.get(6)?;
-        let created_str = match created_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
+        let created_str: String = row.get(6)?;
         let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
 
         Ok(Message {
@@ -61,24 +44,80 @@ impl DbService {
         })
     }
 
+    fn row_to_tool_result(row: &Row) -> DbResult<ToolResult> {
+        let created_str: String = row.get(4)?;
+        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+
+        Ok(ToolResult {
+            id: row.get(0)?,
+            session_id: row.get::<_, String>(1)?.parse().unwrap_or_default(),
+            source_url: row.get::<_, String>(2)?,
+            content: row.get::<_, String>(3)?,
+            created_at,
+        })
+    }
+
+    fn row_to_skill(row: &Row) -> DbResult<Skill> {
+        let created_str: String = row.get(5)?;
+        let updated_str: String = row.get(6)?;
+
+        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+        let updated_at = updated_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+
+        Ok(Skill {
+            id: row.get(0)?,
+            name: row.get::<_, String>(1)?,
+            content: row.get::<_, String>(2)?,
+            tags: row.get::<_, String>(3).unwrap_or_default(),
+            source_url: row.get::<_, Option<String>>(4)?,
+            created_at,
+            updated_at,
+        })
+    }
+
+    fn row_to_pipeline(row: &Row) -> DbResult<Pipeline> {
+        let def_str: String = row.get(2)?;
+        let definition = serde_json::from_str(&def_str).unwrap_or(serde_json::json!({}));
+
+        let created_str: String = row.get(3)?;
+        let updated_str: String = row.get(4)?;
+
+        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+        let updated_at = updated_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
+
+        Ok(Pipeline {
+            id: row.get(0)?,
+            name: row.get::<_, String>(1)?,
+            definition,
+            created_at,
+            updated_at,
+        })
+    }
+
     // --- Session Operations ---
 
-    pub fn insert_session(conn: &Connection, name: &str, metadata: serde_json::Value) -> DbResult<Session> {
+    pub fn insert_session(
+        conn: &Connection,
+        name: &str,
+        metadata: serde_json::Value,
+    ) -> DbResult<Session> {
         let id = Uuid::new_v4();
         let meta_str = metadata.to_string();
-        
+
         conn.execute(
             "INSERT INTO sessions (id, name, metadata) VALUES (?, ?, ?)",
             params![id.to_string(), name, meta_str],
         )?;
-        
+
         Self::get_session(conn, id).map(|s| s.unwrap())
     }
 
     pub fn get_session(conn: &Connection, id: Uuid) -> DbResult<Option<Session>> {
-        let mut stmt = conn.prepare("SELECT id, name, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR), metadata FROM sessions WHERE id = ?")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, updated_at, metadata FROM sessions WHERE id = ?",
+        )?;
         let mut rows = stmt.query_map(params![id.to_string()], Self::row_to_session)?;
-        
+
         if let Some(row) = rows.next() {
             Ok(Some(row?))
         } else {
@@ -86,10 +125,18 @@ impl DbService {
         }
     }
 
-    pub fn list_sessions(conn: &Connection, limit: usize, offset: usize) -> DbResult<Vec<Session>> {
-        let mut stmt = conn.prepare("SELECT id, name, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR), metadata FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?")?;
-        let rows = stmt.query_map(params![limit as i64, offset as i64], Self::row_to_session)?;
-        
+    pub fn list_sessions(
+        conn: &Connection,
+        limit: usize,
+        offset: usize,
+    ) -> DbResult<Vec<Session>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, updated_at, metadata \
+             FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        )?;
+        let rows =
+            stmt.query_map(params![limit as i64, offset as i64], Self::row_to_session)?;
+
         let mut sessions = Vec::new();
         for row in rows {
             sessions.push(row?);
@@ -98,62 +145,43 @@ impl DbService {
     }
 
     pub fn delete_session(conn: &Connection, id: Uuid) -> DbResult<()> {
-        conn.execute("BEGIN TRANSACTION", [])?;
-        
         let id_str = id.to_string();
-        
-        // 1. Delete messages first to satisfy foreign key constraint
-        if let Err(e) = conn.execute("DELETE FROM messages WHERE session_id = ?", params![id_str]) {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e);
-        }
-
-        // 2. Delete the session
-        if let Err(e) = conn.execute("DELETE FROM sessions WHERE id = ?", params![id_str]) {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(e);
-        }
-
-        conn.execute("COMMIT", [])?;
+        conn.execute("DELETE FROM messages WHERE session_id = ?", params![id_str])?;
+        conn.execute("DELETE FROM sessions WHERE id = ?", params![id_str])?;
         Ok(())
     }
 
     pub fn update_session(
-        conn: &Connection, 
-        id: Uuid, 
-        name: Option<String>, 
-        metadata: Option<serde_json::Value>
+        conn: &Connection,
+        id: Uuid,
+        name: Option<String>,
+        metadata: Option<serde_json::Value>,
     ) -> DbResult<Option<Session>> {
         let mut updates = Vec::new();
-        let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        let mut params_vec: Vec<Value> = Vec::new();
 
         if let Some(n) = name {
             updates.push("name = ?");
-            params_vec.push(Box::new(n));
+            params_vec.push(Value::Text(n));
         }
-
         if let Some(m) = metadata {
             updates.push("metadata = ?");
-            params_vec.push(Box::new(m.to_string()));
+            params_vec.push(Value::Text(m.to_string()));
         }
 
         if updates.is_empty() {
             return Self::get_session(conn, id);
         }
 
-        updates.push("updated_at = CURRENT_TIMESTAMP");
-        
+        updates.push("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')");
+
         let sql = format!(
             "UPDATE sessions SET {} WHERE id = ?",
             updates.join(", ")
         );
-        params_vec.push(Box::new(id.to_string()));
+        params_vec.push(Value::Text(id.to_string()));
 
-        // Convert Vec<Box<dyn ToSql>> to a slice of &dyn ToSql
-        let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-
-        conn.execute(&sql, params_from_iter(params_refs))?;
-        
+        conn.execute(&sql, params_from_iter(params_vec))?;
         Self::get_session(conn, id)
     }
 
@@ -169,45 +197,52 @@ impl DbService {
         metadata: serde_json::Value,
     ) -> DbResult<Message> {
         let meta_str = metadata.to_string();
-        
+
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, model, token_count, metadata) 
+            "INSERT INTO messages (session_id, role, content, model, token_count, metadata) \
              VALUES (?, ?, ?, ?, ?, ?)",
-            params![session_id.to_string(), role, content, model, token_count, meta_str],
+            params![
+                session_id.to_string(),
+                role,
+                content,
+                model,
+                token_count,
+                meta_str
+            ],
         )?;
 
-        // Update the session's updated_at timestamp
         conn.execute(
-            "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            params![session_id.to_string()]
+            "UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+            params![session_id.to_string()],
         )?;
-        
-        // Fetch the message we just inserted (since ID is generated by sequence)
+
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, model, token_count, CAST(created_at AS VARCHAR), metadata 
-             FROM messages 
-             WHERE session_id = ? 
-             ORDER BY id DESC LIMIT 1"
+            "SELECT id, session_id, role, content, model, token_count, created_at, metadata \
+             FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(params![session_id.to_string()], Self::row_to_message)?;
-        
+
         Ok(rows.next().unwrap()?)
     }
 
-    pub fn get_messages(conn: &Connection, session_id: Uuid, limit: usize, offset: usize) -> DbResult<Vec<Message>> {
+    pub fn get_messages(
+        conn: &Connection,
+        session_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> DbResult<Vec<Message>> {
         let mut stmt = conn.prepare(
-            "SELECT * FROM (
-                SELECT id, session_id, role, content, model, token_count, CAST(created_at AS VARCHAR) as created_at, metadata 
-                FROM messages 
-                WHERE session_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT ? OFFSET ?
-             ) sub
-             ORDER BY created_at ASC"
+            "SELECT * FROM ( \
+                SELECT id, session_id, role, content, model, token_count, created_at, metadata \
+                FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ? OFFSET ? \
+             ) sub ORDER BY id ASC",
         )?;
-        
-        let rows = stmt.query_map(params![session_id.to_string(), limit as i64, offset as i64], Self::row_to_message)?;
-        
+
+        let rows = stmt.query_map(
+            params![session_id.to_string(), limit as i64, offset as i64],
+            Self::row_to_message,
+        )?;
+
         let mut messages = Vec::new();
         for row in rows {
             messages.push(row?);
@@ -229,23 +264,22 @@ impl DbService {
         )?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, source_url, content, CAST(created_at AS VARCHAR) 
-             FROM tool_results 
-             WHERE session_id = ? 
-             ORDER BY id DESC LIMIT 1"
+            "SELECT id, session_id, source_url, content, created_at \
+             FROM tool_results WHERE session_id = ? ORDER BY id DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![session_id.to_string()], Self::row_to_tool_result)?;
-        
+        let mut rows =
+            stmt.query_map(params![session_id.to_string()], Self::row_to_tool_result)?;
+
         Ok(rows.next().unwrap()?)
     }
 
     pub fn get_tool_result(conn: &Connection, id: i64) -> DbResult<Option<ToolResult>> {
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, source_url, content, CAST(created_at AS VARCHAR) 
-             FROM tool_results WHERE id = ?"
+            "SELECT id, session_id, source_url, content, created_at \
+             FROM tool_results WHERE id = ?",
         )?;
         let mut rows = stmt.query_map(params![id], Self::row_to_tool_result)?;
-        
+
         if let Some(row) = rows.next() {
             Ok(Some(row?))
         } else {
@@ -253,93 +287,50 @@ impl DbService {
         }
     }
 
-    pub fn get_stats(conn: &Connection, db_path: &str) -> DbResult<crate::api::models::SystemStats> {
-        let total_sessions: i64 = conn.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?;
-        let total_messages: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
-        let total_tokens: i64 = conn.query_row("SELECT coalesce(sum(token_count), 0) FROM messages", [], |r| r.get(0))?;
-        
+    // --- Stats ---
+
+    pub fn get_stats(
+        conn: &Connection,
+        db_path: &str,
+    ) -> DbResult<crate::api::models::SystemStats> {
+        let total_sessions: i64 =
+            conn.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?;
+        let total_messages: i64 =
+            conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
+        let total_tokens: i64 = conn.query_row(
+            "SELECT coalesce(sum(token_count), 0) FROM messages",
+            [],
+            |r| r.get(0),
+        )?;
+
         let db_size_bytes = std::fs::metadata(db_path)
             .map(|m| m.len())
             .unwrap_or(0);
-
-        let mut stmt = conn.prepare("SELECT tag, memory_usage_bytes FROM duckdb_memory()")?;
-        let memory_usage = stmt.query_map([], |r| {
-            Ok(crate::api::models::MemoryUsageEntry {
-                tag: r.get(0)?,
-                usage_bytes: r.get(1)?,
-            })
-        })?.collect::<DbResult<Vec<_>>>()?;
 
         Ok(crate::api::models::SystemStats {
             total_sessions,
             total_messages,
             total_tokens,
             db_size_bytes,
-            memory_usage,
+            memory_usage: vec![],
         })
     }
 
-    fn row_to_tool_result(row: &Row) -> DbResult<ToolResult> {
-        let created_val: duckdb::types::Value = row.get(4)?;
-        let created_str = match created_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-
-        Ok(ToolResult {
-            id: row.get(0)?,
-            session_id: row.get::<_, String>(1)?.parse().unwrap_or_default(),
-            source_url: row.get::<_, String>(2)?,
-            content: row.get::<_, String>(3)?,
-            created_at,
-        })
-    }
+    // --- Purge ---
 
     pub fn purge_database(conn: &Connection) -> DbResult<()> {
-        conn.execute_batch("
-            DROP TABLE IF EXISTS messages;
-            DROP TABLE IF EXISTS tool_results;
-            DROP TABLE IF EXISTS sessions;
-            DROP TABLE IF EXISTS skills;
-            DROP TABLE IF EXISTS pipelines;
-            DROP SEQUENCE IF EXISTS seq_messages_id;
-            DROP SEQUENCE IF EXISTS seq_tool_results_id;
-            DROP SEQUENCE IF EXISTS seq_skills_id;
-            DROP SEQUENCE IF EXISTS seq_pipelines_id;
-        ")?;
-        
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS messages;
+             DROP TABLE IF EXISTS tool_results;
+             DROP TABLE IF EXISTS sessions;
+             DROP TABLE IF EXISTS skills;
+             DROP TABLE IF EXISTS pipelines;",
+        )?;
+
         conn.execute_batch(crate::db::connection::SCHEMA)
     }
 
     // --- Skill Operations ---
-
-    fn row_to_skill(row: &Row) -> DbResult<Skill> {
-        let created_val: duckdb::types::Value = row.get(5)?;
-        let updated_val: duckdb::types::Value = row.get(6)?;
-
-        let created_str = match created_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-        let updated_str = match updated_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-
-        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-        let updated_at = updated_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-
-        Ok(Skill {
-            id: row.get(0)?,
-            name: row.get::<_, String>(1)?,
-            content: row.get::<_, String>(2)?,
-            tags: row.get::<_, String>(3).unwrap_or_default(),
-            source_url: row.get::<_, Option<String>>(4)?,
-            created_at,
-            updated_at,
-        })
-    }
 
     pub fn insert_skill(
         conn: &Connection,
@@ -354,21 +345,24 @@ impl DbService {
         )?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, content, tags, source_url, \
-             CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) \
+            "SELECT id, name, content, tags, source_url, created_at, updated_at \
              FROM skills ORDER BY id DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], Self::row_to_skill)?;
         Ok(rows.next().unwrap()?)
     }
 
-    pub fn list_skills(conn: &Connection, limit: usize, offset: usize) -> DbResult<Vec<Skill>> {
+    pub fn list_skills(
+        conn: &Connection,
+        limit: usize,
+        offset: usize,
+    ) -> DbResult<Vec<Skill>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, content, tags, source_url, \
-             CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) \
+            "SELECT id, name, content, tags, source_url, created_at, updated_at \
              FROM skills ORDER BY updated_at DESC LIMIT ? OFFSET ?",
         )?;
-        let rows = stmt.query_map(params![limit as i64, offset as i64], Self::row_to_skill)?;
+        let rows =
+            stmt.query_map(params![limit as i64, offset as i64], Self::row_to_skill)?;
         let mut skills = Vec::new();
         for row in rows {
             skills.push(row?);
@@ -378,8 +372,7 @@ impl DbService {
 
     pub fn get_skill(conn: &Connection, id: i64) -> DbResult<Option<Skill>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, content, tags, source_url, \
-             CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) \
+            "SELECT id, name, content, tags, source_url, created_at, updated_at \
              FROM skills WHERE id = ?",
         )?;
         let mut rows = stmt.query_map(params![id], Self::row_to_skill)?;
@@ -398,33 +391,31 @@ impl DbService {
         tags: Option<String>,
     ) -> DbResult<Option<Skill>> {
         let mut updates = Vec::new();
-        let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        let mut params_vec: Vec<Value> = Vec::new();
 
         if let Some(n) = name {
             updates.push("name = ?");
-            params_vec.push(Box::new(n));
+            params_vec.push(Value::Text(n));
         }
         if let Some(c) = content {
             updates.push("content = ?");
-            params_vec.push(Box::new(c));
+            params_vec.push(Value::Text(c));
         }
         if let Some(t) = tags {
             updates.push("tags = ?");
-            params_vec.push(Box::new(t));
+            params_vec.push(Value::Text(t));
         }
 
         if updates.is_empty() {
             return Self::get_skill(conn, id);
         }
 
-        updates.push("updated_at = CURRENT_TIMESTAMP");
+        updates.push("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')");
 
         let sql = format!("UPDATE skills SET {} WHERE id = ?", updates.join(", "));
-        params_vec.push(Box::new(id));
+        params_vec.push(Value::Integer(id));
 
-        let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-        conn.execute(&sql, params_from_iter(params_refs))?;
-
+        conn.execute(&sql, params_from_iter(params_vec))?;
         Self::get_skill(conn, id)
     }
 
@@ -438,7 +429,9 @@ impl DbService {
         if let Ok(entries) = std::fs::read_dir(dir_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if path.is_file()
+                    && path.extension().and_then(|e| e.to_str()) == Some("md")
+                {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         let mut name = String::new();
                         let mut tags = String::new();
@@ -453,7 +446,7 @@ impl DbService {
                                 }
                                 continue;
                             }
-                            
+
                             if in_frontmatter {
                                 if let Some(n) = line.strip_prefix("name: ") {
                                     name = n.trim().to_string();
@@ -468,20 +461,32 @@ impl DbService {
                         }
 
                         if name.is_empty() {
-                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                name = stem.replace("_", " ");
-                                // Title case it basic
-                                name = name.chars().enumerate().map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c }).collect();
+                            if let Some(stem) =
+                                path.file_stem().and_then(|s| s.to_str())
+                            {
+                                name = stem.replace('_', " ");
+                                name = name
+                                    .chars()
+                                    .enumerate()
+                                    .map(|(i, c)| {
+                                        if i == 0 {
+                                            c.to_ascii_uppercase()
+                                        } else {
+                                            c
+                                        }
+                                    })
+                                    .collect();
                             } else {
                                 name = "Unnamed Skill".to_string();
                             }
                         }
 
-                        // Check if skill already exists by name
-                        let mut stmt = conn.prepare("SELECT count(*) FROM skills WHERE name = ?")?;
-                        let exists: i64 = stmt.query_row(params![name], |r| r.get(0))?;
-                        
-                        // We store the intact content (including frontmatter)
+                        let exists: i64 = conn.query_row(
+                            "SELECT count(*) FROM skills WHERE name = ?",
+                            params![name],
+                            |r| r.get(0),
+                        )?;
+
                         if exists == 0 {
                             Self::insert_skill(conn, &name, content.trim(), &tags, None)?;
                             count += 1;
@@ -493,61 +498,36 @@ impl DbService {
         Ok(count)
     }
 
-    pub fn query_raw(conn: &Connection, sql: &str) -> DbResult<crate::api::models::SqlQueryResponse> {
+    // --- Raw query ---
+
+    pub fn query_raw(
+        conn: &Connection,
+        sql: &str,
+    ) -> DbResult<crate::api::models::SqlQueryResponse> {
         let mut stmt = conn.prepare(sql)?;
+        let col_names: Vec<String> =
+            stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+
         let mut rows = stmt.query([])?;
-        
-        let mut col_names = Vec::new();
         let mut results = Vec::new();
 
         while let Some(row) = rows.next()? {
-            if col_names.is_empty() {
-                let stmt_ref = row.as_ref();
-                let col_count = stmt_ref.column_count();
-                for i in 0..col_count {
-                    col_names.push(stmt_ref.column_name(i).map(|s| s.to_string()).unwrap_or_else(|_| format!("col_{}", i)));
-                }
-            }
-
             let mut row_obj = serde_json::Map::new();
-            for i in 0..col_names.len() {
-                let col_name = col_names[i].clone();
-                let value: duckdb::types::Value = row.get(i)?;
-                
+            for (i, col_name) in col_names.iter().enumerate() {
+                let value: Value = row.get(i)?;
+
                 let json_val = match value {
-                    duckdb::types::Value::Null => serde_json::Value::Null,
-                    duckdb::types::Value::Boolean(b) => serde_json::Value::Bool(b),
-                    duckdb::types::Value::TinyInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::SmallInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::Int(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::BigInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::HugeInt(v) => serde_json::Value::String(v.to_string()),
-                    duckdb::types::Value::UTinyInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::USmallInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::UInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::UBigInt(v) => serde_json::Value::Number(v.into()),
-                    duckdb::types::Value::Float(v) => serde_json::Number::from_f64(v as f64).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
-                    duckdb::types::Value::Double(v) => serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
-                    duckdb::types::Value::Decimal(v) => serde_json::Value::String(v.to_string()),
-                    duckdb::types::Value::Timestamp(_, _) => {
-                        serde_json::Value::String(format!("{:?}", value))
-                    },
-                    duckdb::types::Value::Text(t) => serde_json::Value::String(t),
-                    duckdb::types::Value::Blob(b) => serde_json::Value::String(format!("blob({})", b.len())),
-                    _ => serde_json::Value::String(format!("{:?}", value)),
+                    Value::Null => serde_json::Value::Null,
+                    Value::Integer(v) => serde_json::Value::Number(v.into()),
+                    Value::Real(v) => serde_json::Number::from_f64(v)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null),
+                    Value::Text(t) => serde_json::Value::String(t),
+                    Value::Blob(b) => serde_json::Value::String(format!("blob({})", b.len())),
                 };
-                row_obj.insert(col_name, json_val);
+                row_obj.insert(col_name.clone(), json_val);
             }
             results.push(serde_json::Value::Object(row_obj));
-        }
-
-        // Handle empty results by attempting to get metadata from the original statement.
-        // Since the statement was executed by `query()`, this might be safe now.
-        if col_names.is_empty() {
-             let count = stmt.column_count();
-             for i in 0..count {
-                 col_names.push(stmt.column_name(i).map(|s| s.to_string()).unwrap_or_else(|_| format!("col_{}", i)));
-             }
         }
 
         Ok(crate::api::models::SqlQueryResponse {
@@ -557,34 +537,6 @@ impl DbService {
     }
 
     // --- Pipeline Operations ---
-
-    fn row_to_pipeline(row: &Row) -> DbResult<Pipeline> {
-        let def_str: String = row.get(2)?;
-        let definition = serde_json::from_str(&def_str).unwrap_or(serde_json::json!({}));
-
-        let created_val: duckdb::types::Value = row.get(3)?;
-        let updated_val: duckdb::types::Value = row.get(4)?;
-
-        let created_str = match created_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-        let updated_str = match updated_val {
-            duckdb::types::Value::Text(s) => s,
-            _ => String::new(),
-        };
-
-        let created_at = created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-        let updated_at = updated_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now());
-
-        Ok(Pipeline {
-            id: row.get(0)?,
-            name: row.get::<_, String>(1)?,
-            definition,
-            created_at,
-            updated_at,
-        })
-    }
 
     pub fn insert_pipeline(
         conn: &Connection,
@@ -598,8 +550,8 @@ impl DbService {
         )?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) 
-             FROM pipelines ORDER BY id DESC LIMIT 1"
+            "SELECT id, name, definition, created_at, updated_at \
+             FROM pipelines ORDER BY id DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], Self::row_to_pipeline)?;
         Ok(rows.next().unwrap()?)
@@ -607,8 +559,8 @@ impl DbService {
 
     pub fn get_pipeline(conn: &Connection, id: i64) -> DbResult<Option<Pipeline>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) 
-             FROM pipelines WHERE id = ?"
+            "SELECT id, name, definition, created_at, updated_at \
+             FROM pipelines WHERE id = ?",
         )?;
         let mut rows = stmt.query_map(params![id], Self::row_to_pipeline)?;
         if let Some(row) = rows.next() {
@@ -618,10 +570,13 @@ impl DbService {
         }
     }
 
-    pub fn get_pipeline_by_name(conn: &Connection, name: &str) -> DbResult<Option<Pipeline>> {
+    pub fn get_pipeline_by_name(
+        conn: &Connection,
+        name: &str,
+    ) -> DbResult<Option<Pipeline>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR)
-             FROM pipelines WHERE lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1"
+            "SELECT id, name, definition, created_at, updated_at \
+             FROM pipelines WHERE lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(params![name], Self::row_to_pipeline)?;
         if let Some(row) = rows.next() {
@@ -631,12 +586,17 @@ impl DbService {
         }
     }
 
-    pub fn list_pipelines(conn: &Connection, limit: usize, offset: usize) -> DbResult<Vec<Pipeline>> {
+    pub fn list_pipelines(
+        conn: &Connection,
+        limit: usize,
+        offset: usize,
+    ) -> DbResult<Vec<Pipeline>> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, CAST(definition AS VARCHAR), CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR) 
-             FROM pipelines ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+            "SELECT id, name, definition, created_at, updated_at \
+             FROM pipelines ORDER BY updated_at DESC LIMIT ? OFFSET ?",
         )?;
-        let rows = stmt.query_map(params![limit as i64, offset as i64], Self::row_to_pipeline)?;
+        let rows =
+            stmt.query_map(params![limit as i64, offset as i64], Self::row_to_pipeline)?;
         let mut pipelines = Vec::new();
         for row in rows {
             pipelines.push(row?);
@@ -651,29 +611,27 @@ impl DbService {
         definition: Option<serde_json::Value>,
     ) -> DbResult<Option<Pipeline>> {
         let mut updates = Vec::new();
-        let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        let mut params_vec: Vec<Value> = Vec::new();
 
         if let Some(n) = name {
             updates.push("name = ?");
-            params_vec.push(Box::new(n));
+            params_vec.push(Value::Text(n));
         }
         if let Some(d) = definition {
             updates.push("definition = ?");
-            params_vec.push(Box::new(d.to_string()));
+            params_vec.push(Value::Text(d.to_string()));
         }
 
         if updates.is_empty() {
             return Self::get_pipeline(conn, id);
         }
 
-        updates.push("updated_at = CURRENT_TIMESTAMP");
+        updates.push("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')");
 
         let sql = format!("UPDATE pipelines SET {} WHERE id = ?", updates.join(", "));
-        params_vec.push(Box::new(id));
+        params_vec.push(Value::Integer(id));
 
-        let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-        conn.execute(&sql, params_from_iter(params_refs))?;
-
+        conn.execute(&sql, params_from_iter(params_vec))?;
         Self::get_pipeline(conn, id)
     }
 

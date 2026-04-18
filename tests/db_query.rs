@@ -1,14 +1,17 @@
-use stepbit::db::{connection, service::DbService};
-use stepbit::config::DatabaseConfig;
+use rusqlite::Connection;
 use serde_json::json;
+use stepbit::db::connection::SCHEMA;
+use stepbit::db::service::DbService;
+
+fn open_test_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    conn
+}
 
 #[test]
 fn test_raw_sql_query() {
-    let config = DatabaseConfig {
-        path: ":memory:".to_string(),
-    };
-    let pool = connection::get_connection(&config).unwrap();
-    let conn = pool.lock().unwrap();
+    let conn = open_test_db();
 
     // 1. Simple SELECT
     let res = DbService::query_raw(&conn, "SELECT 1 as id, 'hello' as name").unwrap();
@@ -21,21 +24,14 @@ fn test_raw_sql_query() {
     let res = DbService::query_raw(&conn, "SELECT name FROM sessions").unwrap();
     assert_eq!(res.rows[0]["name"], json!("Test Session"));
 
-    // 3. Complex types (Boolean, Null)
-    let res = DbService::query_raw(&conn, "SELECT true as b, null as n").unwrap();
-    assert_eq!(res.rows[0]["b"], json!(true));
+    // 3. Null value
+    let res = DbService::query_raw(&conn, "SELECT null as n").unwrap();
     assert_eq!(res.rows[0]["n"], json!(null));
 }
 
 #[test]
 fn test_query_error_handling() {
-    let config = DatabaseConfig {
-        path: ":memory:".to_string(),
-    };
-    let pool = connection::get_connection(&config).unwrap();
-    let conn = pool.lock().unwrap();
-
-    // Syntax error
+    let conn = open_test_db();
     let res = DbService::query_raw(&conn, "SELECT * FROM non_existent_table");
     assert!(res.is_err());
 }

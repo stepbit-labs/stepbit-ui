@@ -669,7 +669,7 @@ pub async fn run_reasoning_command(
                     "node_type": "LlmGeneration",
                     "payload": {
                         "prompt": req.question,
-                        "max_tokens": req.max_tokens.unwrap_or(384)
+                        "max_tokens": req.max_tokens.unwrap_or(2048)
                     }
                 }
             },
@@ -1186,7 +1186,7 @@ fn build_reasoning_graph_definition(prompt: &str, max_tokens: Option<u32>) -> se
                 "node_type": "LlmGeneration",
                 "payload": {
                     "prompt": prompt,
-                    "max_tokens": max_tokens.unwrap_or(384)
+                    "max_tokens": max_tokens.unwrap_or(2048)
                 }
             }
         },
@@ -1620,12 +1620,12 @@ async fn generate_quantlab_analysis(
     ];
 
     let analysis_result = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
+        std::time::Duration::from_secs(30),
         llm.chat(
             &messages,
             ChatOptions {
                 temperature: Some(0.2),
-                max_tokens: Some(220),
+                max_tokens: Some(1024),
                 ..Default::default()
             },
         ),
@@ -1745,12 +1745,12 @@ async fn generate_execution_analysis(
     ];
 
     let analysis_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
         llm.chat(
             &messages,
             ChatOptions {
                 temperature: Some(0.2),
-                max_tokens: Some(220),
+                max_tokens: Some(1024),
                 ..Default::default()
             },
         ),
@@ -2247,7 +2247,7 @@ mod tests {
     }
 
     fn test_pool() -> DbPool {
-        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::db::connection::SCHEMA).unwrap();
         Arc::new(std::sync::Mutex::new(conn))
     }

@@ -1,0 +1,3 @@
+# Target compartido con el workspace stepbit
+[build]
+target-dir = "../.stepbit-target"
